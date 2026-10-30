@@ -80,12 +80,15 @@ stockage.{$BASE_DOMAIN} {
 }
 
 http://certificat.{$BASE_DOMAIN} {
-    root /srv/certificat
-    file_server
-
-    @root_cert path /root.crt
-    rewrite @root_cert /data/caddy/pki/authorities/local/root.crt
-    header @root_cert Content-Type "application/x-x509-ca-cert"
-    header @root_cert Content-Disposition "attachment; filename=root.crt"
-    file_server @root_cert
+    handle /root.crt {
+        root * /data/caddy/pki/authorities/local
+        rewrite * /root.crt
+        header Content-Type "application/x-x509-ca-cert"
+        header Content-Disposition "attachment; filename=root.crt"
+        file_server
+    }
+    handle {
+        root * /srv/certificat
+        file_server
+    }
 }
