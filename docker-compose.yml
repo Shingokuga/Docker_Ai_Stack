@@ -267,6 +267,12 @@ services:
       WEBUI_URL: https://chat-ai.${BASE_DOMAIN:-local}
       WEBUI_SECRET_KEY: ${WEBUI_SECRET_KEY:?WEBUI_SECRET_KEY manquant}
       DATABASE_URL: postgresql://postgres:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD manquant}@postgres:5432/openwebui
+      # Compte admin automatique (créé au 1er démarrage si base vide)
+      WEBUI_ADMIN_EMAIL: ${WEBUI_ADMIN_EMAIL:?WEBUI_ADMIN_EMAIL manquant}
+      WEBUI_ADMIN_PASSWORD: ${WEBUI_ADMIN_PASSWORD:?WEBUI_ADMIN_PASSWORD manquant}
+      WEBUI_ADMIN_NAME: Admin
+      # API keys pour scripts d'administration
+      ENABLE_API_KEYS: "true"
       # Chat: uniquement via LiteLLM (pas d'Ollama direct)
       ENABLE_OLLAMA_API: "false"
       OPENAI_API_BASE_URL: http://litellm:4000/v1
@@ -519,6 +525,26 @@ services:
       - "9222"
     networks: [ai_net]
     logging: *default-logging
+    #   mem_limit: 512m
+    #   cpus: 1.0
+
+  # ---------------- Obscura MCP (serveur MCP pour Open WebUI) ----------------
+  # Même image que obscura, mode MCP HTTP. Exposé uniquement sur le réseau interne.
+  # Open WebUI y accède via http://obscura-mcp:3000/mcp avec un token Bearer.
+  obscura-mcp:
+    image: ${IMG_OBSCURA:?IMG_OBSCURA manquant (versions.env)}
+    restart: unless-stopped
+    command: ["mcp", "--http", "--host", "0.0.0.0", "--port", "3000"]
+    security_opt:
+      - "no-new-privileges:true"
+    environment:
+      TZ: ${TZ:-Europe/Paris}
+      OBSCURA_MCP_TOKEN: ${OBSCURA_MCP_TOKEN:?OBSCURA_MCP_TOKEN manquant (>= 32 octets)}
+    expose:
+      - "3000"
+    networks: [ai_net]
+    logging: *default-logging
+    # Image distroless sans shell : aucun healthcheck shell possible
     #   mem_limit: 512m
     #   cpus: 1.0
 

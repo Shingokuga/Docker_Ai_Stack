@@ -80,6 +80,17 @@ fill_secret "S3_ROOT_PASSWORD" gen_hex
 
 # Obscura CDP token (48 caractères hex = 24 octets >= 32 octets requis)
 fill_secret "OBSCURA_CDP_TOKEN" gen_hex
+# Obscura MCP token (id. pour le serveur MCP interne http://obscura-mcp:3000/mcp)
+fill_secret "OBSCURA_MCP_TOKEN" gen_hex
+
+# Open WebUI admin
+# Email par défaut si vide ; mot de passe >= 24 caractères (gen_pass24)
+gen_pass24() {
+    openssl rand -base64 32 | tr -d '/+=' | head -c 32
+}
+# Email : valeur fixe par défaut (pas aléatoire) pour la simplicité
+grep -qE "^WEBUI_ADMIN_EMAIL=[^=]$" "$ENV_FILE" || sed -i "s|^WEBUI_ADMIN_EMAIL=|WEBUI_ADMIN_EMAIL=admin@stack.local|" "$ENV_FILE"
+fill_secret "WEBUI_ADMIN_PASSWORD" gen_pass24
 
 # Langfuse init headless
 fill_secret "LANGFUSE_INIT_ORG_ID" "echo org-default"
