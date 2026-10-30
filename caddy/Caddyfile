@@ -1,0 +1,91 @@
+{
+    skip_install_trust
+}
+
+chat-ai.{$BASE_DOMAIN} {
+    tls internal
+    encode zstd gzip
+    header {
+        -Server
+        X-Content-Type-Options nosniff
+        Referrer-Policy no-referrer
+    }
+    reverse_proxy open-webui:8080
+}
+
+automatisation.{$BASE_DOMAIN} {
+    tls internal
+    encode zstd gzip
+    header {
+        -Server
+        X-Content-Type-Options nosniff
+        Referrer-Policy no-referrer
+    }
+    reverse_proxy n8n:5678
+}
+
+suivi-ia.{$BASE_DOMAIN} {
+    tls internal
+    encode zstd gzip
+    header {
+        -Server
+        X-Content-Type-Options nosniff
+        Referrer-Policy no-referrer
+    }
+    reverse_proxy langfuse-web:3000
+}
+
+admin.{$BASE_DOMAIN} {
+    tls internal
+    encode zstd gzip
+    header {
+        -Server
+        X-Content-Type-Options nosniff
+        Referrer-Policy no-referrer
+    }
+    reverse_proxy portainer:9000
+}
+
+documents.{$BASE_DOMAIN} {
+    tls internal
+    encode zstd gzip
+    header {
+        -Server
+        X-Content-Type-Options nosniff
+        Referrer-Policy no-referrer
+    }
+    reverse_proxy docling-serve:5001
+}
+
+api.{$BASE_DOMAIN} {
+    tls internal
+    encode zstd gzip
+    header {
+        -Server
+        X-Content-Type-Options nosniff
+        Referrer-Policy no-referrer
+    }
+    reverse_proxy litellm:4000
+}
+
+stockage.{$BASE_DOMAIN} {
+    tls internal
+    encode zstd gzip
+    header {
+        -Server
+        X-Content-Type-Options nosniff
+        Referrer-Policy no-referrer
+    }
+    reverse_proxy s3:9001
+}
+
+http://certificat.{$BASE_DOMAIN} {
+    root /srv/certificat
+    file_server
+
+    @root_cert path /root.crt
+    rewrite @root_cert /data/caddy/pki/authorities/local/root.crt
+    header @root_cert Content-Type "application/x-x509-ca-cert"
+    header @root_cert Content-Disposition "attachment; filename=root.crt"
+    file_server @root_cert
+}

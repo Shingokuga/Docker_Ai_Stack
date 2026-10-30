@@ -1,0 +1,37 @@
+use_default_settings: true
+
+general:
+  debug: false
+  instance_name: "Recherche locale"
+  enable_metrics: false
+
+search:
+  default_lang: "fr"
+  formats:
+    - json
+    - html
+
+server:
+  limiter: false
+  public_instance: false
+  image_proxy: true
+
+ui:
+  default_theme: simple
+  default_locale: ""
+  query_in_title: false
+
+outgoing:
+  request_timeout: 3.0
+  pool_connections: 100
+  pool_maxsize: 20
+  enable_http2: true
+
+plugins:
+  - "Hash plugin"
+  - "Hostnames plugin"
+  - "Online Etymology Dictionary"
+  - "Safe search plugin"
+  - "Self Info"
+  - "Tracker URL remover"
+  - "Unit converter"

@@ -1,0 +1,110 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Installer le certificat de sécurité</title>
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 40px 20px;
+            line-height: 1.6;
+            color: #333;
+        }
+        h1 {
+            color: #2563eb;
+            margin-bottom: 20px;
+        }
+        .download-btn {
+            display: inline-block;
+            background-color: #2563eb;
+            color: white;
+            padding: 12px 24px;
+            text-decoration: none;
+            border-radius: 8px;
+            font-weight: bold;
+            margin: 20px 0;
+        }
+        .instructions {
+            background-color: #f8fafc;
+            border-radius: 8px;
+            padding: 20px;
+            margin: 20px 0;
+        }
+        .instructions h3 {
+            margin-top: 0;
+            color: #2563eb;
+        }
+        .note {
+            background-color: #fffbeb;
+            border-left: 4px solid #f59e0b;
+            padding: 12px;
+            margin: 20px 0;
+            border-radius: 4px;
+        }
+    </style>
+</head>
+<body>
+    <h1>Installer le certificat de sécurité</h1>
+    
+    <p>
+        Cette installation locale utilise un certificat SSL auto-signé.
+        Pour que vos navigateurs reconnaissent les connexions comme sécurisées,
+        installez ce certificat racine sur vos appareils.
+    </p>
+
+    <a href="/root.crt" class="download-btn" download="root.crt">
+        ⬇ Télécharger le certificat root.crt
+    </a>
+
+    <div class="note">
+        <strong>Note :</strong> À faire une seule fois par appareil. Nécessaire pour utiliser le micro.
+    </div>
+
+    <div class="instructions">
+        <h3>🪟 Windows</h3>
+        <ol>
+            <li>Double-cliquez sur le fichier <strong>root.crt</strong> téléchargé</li>
+            <li>Cliquez sur <strong>Installer le certificat</strong></li>
+            <li>Choisissez <strong>Emplacement du magasin : Utilisateur courant</strong></li>
+            <li>Cliquez sur Suivant, puis sélectionnez <strong>« Autorités de certification racines de confiance »</strong></li>
+            <li>Terminez l'assistant et confirmez les fenêtres de sécurité</li>
+        </ol>
+    </div>
+
+    <div class="instructions">
+        <h3>🍎 macOS</h3>
+        <ol>
+            <li>Ouvrez le fichier <strong>root.crt</strong> (il se lance dans le Trousseau d'accès)</li>
+            <li>Dans le Trousseau d'accès, double-cliquez sur le certificat ajouté</li>
+            <li>Dans la section <strong>Confiance</strong>, mettez « Utiliser ce certificat : » sur <strong>Toujours approuver</strong></li>
+            <li>Fermez la fenêtre et entrez votre mot de passe si demandé</li>
+        </ol>
+    </div>
+
+    <div class="instructions">
+        <h3>📱 iPhone / iPad</h3>
+        <ol>
+            <li>Ouvrez Safari et accédez à cette même page</li>
+            <li>Téléchargez le certificat — un profil sera téléchargé</li>
+            <li>Allez dans <strong>Réglages</strong> — vous verrez un profil en attente en haut</li>
+            <li>Touchez-le, puis <strong>Installer</strong> et entrez votre code d'accès</li>
+            <li>Allez ensuite dans <strong>Réglages</strong> &gt; <strong>Général</strong> &gt; <strong>Informations</strong></li>
+            <li>Descendez jusqu'à <strong>Réglages des certificats</strong> et activez la confiance pour ce certificat</li>
+        </ol>
+    </div>
+
+    <div class="instructions">
+        <h3>🤖 Android</h3>
+        <ol>
+            <li>Ouvrez Chrome et accédez à cette page, téléchargez le certificat</li>
+            <li>Allez dans <strong>Paramètres</strong> &gt; <strong>Sécurité</strong> (ou Sécurité et confidentialité)</li>
+            <li>Sélectionnez <strong>Installer un certificat à partir du stockage</strong> (ou « Certificats CA »)</li>
+            <li>Choisissez le fichier <strong>root.crt</strong> téléchargé</li>
+            <li>Nommez-le et confirmez l'installation</li>
+        </ol>
+    </div>
+</body>
+</html>
