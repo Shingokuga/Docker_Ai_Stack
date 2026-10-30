@@ -1,8 +1,7 @@
 #!/usr/bin/env bash
-# bootstrap.sh — Prérequis système pour la stack universelle AI
-# Copier ce script seul sur une machine vierge et le lancer.
-# Installe Docker, git, les dépendances nécessaires, configure le GPU,
-# clone le dépôt et prépare le lancement de install.sh.
+# bootstrap.sh — Point d'entrée unique pour installer la stack universelle AI
+# Prérequis système, installation Docker/GPU, clonage du dépôt, puis installation.
+# Compatible "curl | bash" — utilise /dev/tty pour les questions si nécessaire.
 set -euo pipefail
 
 info() { echo "ℹ  $*"; }
@@ -13,15 +12,8 @@ err() { echo "❌ $*" >&2; }
 # -------------------------------------------------------
 # Configuration
 # -------------------------------------------------------
-STACK_REPO_URL="${STACK_REPO_URL:-${1:-}}"
-STACK_DIR="${STACK_DIR:-$HOME/stack}"
-
-if [ -z "$STACK_REPO_URL" ]; then
-    err "STACK_REPO_URL non défini."
-    echo "Utilisation : STACK_REPO_URL=https://github.com/.../repo.git ./bootstrap.sh"
-    echo "   ou : ./bootstrap.sh https://github.com/.../repo.git"
-    exit 1
-fi
+STACK_REPO_URL="${STACK_REPO_URL:-https://github.com/Shingokuga/Docker_Ai_Stack.git}"
+STACK_DIR="${STACK_DIR:-$HOME/Docker_Ai_Stack}"
 
 info "Dépôt : $STACK_REPO_URL"
 info "Répertoire cible : $STACK_DIR"
@@ -56,11 +48,33 @@ if ! command -v sudo >/dev/null 2>&1; then
 fi
 
 # -------------------------------------------------------
+# Mise à jour système complète
+# -------------------------------------------------------
+info "Mise à jour système complète (apt update && apt upgrade)..."
+if [ "$PKG_MGR" = "apt" ]; then
+    export DEBIAN_FRONTEND=noninteractive
+    sudo apt update -y
+    sudo apt upgrade -y -o Dpkg::Options::="--force-confold"
+elif [ "$PKG_MGR" = "dnf" ]; then
+    sudo dnf -y upgrade
+fi
+
+# Vérifier si redémarrage nécessaire
+if [ -f /var/run/reboot-required ]; then
+    ok "Mise à jour terminée"
+    echo ""
+    echo "⚠️  Un redémarrage est nécessaire après la mise à jour du noyau."
+    echo "Redémarrez la machine, puis relancez cette même commande :"
+    echo "  $0"
+    exit 0
+fi
+ok "Système à jour"
+
+# -------------------------------------------------------
 # Paquets de base
 # -------------------------------------------------------
 info "Installation des paquets de base (git, curl, ca-certificates, jq, git-lfs)..."
 if [ "$PKG_MGR" = "apt" ]; then
-    sudo apt update -y
     sudo apt install -y git git-lfs curl ca-certificates jq
 elif [ "$PKG_MGR" = "dnf" ]; then
     sudo dnf -y install git git-lfs curl ca-certificates jq
@@ -131,7 +145,7 @@ fi
 if ! groups | grep -q docker; then
     info "Ajout de $USER au groupe docker"
     sudo usermod -aG docker "$USER"
-    warn "Ouvrez une nouvelle session pour que le groupe docker s'applique"
+    warn "Le groupe docker sera actif à la prochaine connexion"
 fi
 ok "Groupe docker configuré"
 
@@ -149,7 +163,7 @@ git lfs install
 ok "git-lfs installé"
 
 # -------------------------------------------------------
-# Clone / Pull du dépôt
+# Clone / Pull du dépôt (avec support dépôt privé)
 # -------------------------------------------------------
 if [ -d "$STACK_DIR" ]; then
     info "Répertoire $STACK_DIR existe — mise à jour..."
@@ -158,17 +172,44 @@ if [ -d "$STACK_DIR" ]; then
 else
     info "Clonage de $STACK_REPO_URL vers $STACK_DIR..."
     mkdir -p "$(dirname "$STACK_DIR")"
-    git clone "$STACK_REPO_URL" "$STACK_DIR"
-    cd "$STACK_DIR"
+
+    if [ -n "${GITHUB_TOKEN:-}" ]; then
+        # Dépôt privé : utiliser le jeton pour l'authentification
+        CLONE_URL=$(echo "$STACK_REPO_URL" | sed 's|https://github.com/|https://oauth2:'"$GITHUB_TOKEN"'@github.com/|')
+        git clone "$CLONE_URL" "$STACK_DIR"
+        # Ne pas laisser le jeton dans .git/config
+        cd "$STACK_DIR"
+        git remote set-url origin "$STACK_REPO_URL"
+        cd -
+    else
+        if ! git clone "$STACK_REPO_URL" "$STACK_DIR" 2>/dev/null; then
+            err "Clonage du dépôt échoué."
+            echo ""
+            echo "Si le dépôt est privé, définissez GITHUB_TOKEN :"
+            echo "  GITHUB_TOKEN=votre-jeton ./bootstrap.sh"
+            echo ""
+            echo "Pour créer un token : https://github.com/settings/tokens/new"
+            echo "(scope : repo)"
+            exit 1
+        fi
+    fi
 fi
+cd "$STACK_DIR"
 git lfs pull
 ok "Dépôt prêt à $STACK_DIR"
 
+# -------------------------------------------------------
+# Lancement automatique de install.sh
+# -------------------------------------------------------
 echo ""
 echo "=============================================="
-echo "Bootstrap terminé !"
+echo "Bootstrap terminé ! Lancement de l'installation..."
 echo "=============================================="
 echo ""
-echo "Ouvre une nouvelle session (groupe docker) puis lance :"
-echo "  cd $STACK_DIR && ./install.sh"
-echo ""
+
+# Si on n'est pas dans le groupe docker, on utilise sg pour éviter le problème
+if groups | grep -q docker; then
+    bash "$STACK_DIR/install.sh"
+else
+    sg docker -c "bash $STACK_DIR/install.sh"
+fi
