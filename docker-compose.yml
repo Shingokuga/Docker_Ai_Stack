@@ -502,6 +502,271 @@ services:
     #   mem_limit: 512m
     #   cpus: 1.0
 
+# ==== APPS (lot A4) : voix, observabilité, stockage ====
+# PRÉREQUIS PERMISSIONS (install.sh, lot B) — les bind mounts sont créés root par Docker; ces images
+# tournent en non-root et NE font PAS de chown au démarrage:
+#   install -d -o 101   -g 101   ${DATA_DIR}/clickhouse/data ${DATA_DIR}/clickhouse/logs   # clickhouse (user 101:101)
+#   install -d -o 10001 -g 10001 ${DATA_DIR}/s3                                            # RustFS (uid 10001)
+#   install -d -o 1000  -g 1000  ${DATA_DIR}/whisper                                       # speaches (user ubuntu)
+# kokoro: aucun volume (modèle et voix intégrés à l'image).
+
+  # ---------------- Kokoro-FastAPI (TTS, API OpenAI /v1/audio/speech) ----------------
+  kokoro:
+    image: ${IMG_KOKORO:?IMG_KOKORO manquant (versions.env)}
+    restart: unless-stopped
+    <<: *gpu
+    environment:
+      TZ: ${TZ:-Europe/Paris}
+      # Voix par défaut côté serveur (Open WebUI envoie aussi AUDIO_TTS_VOICE)
+      DEFAULT_VOICE: ${KOKORO_VOICE_DEFAULT:-ff_siwis}
+    expose:
+      - "8880"
+    healthcheck:
+      # curl présent dans l'image (vérifié dans le Dockerfile v0.9.1); GET /health
+      test: ["CMD", "curl", "-fsS", "http://localhost:8880/health"]
+      interval: 20s
+      timeout: 10s
+      retries: 10
+      start_period: 90s
+    networks: [ai_net]
+    logging: *default-logging
+    #   mem_limit: 4g
+    #   cpus: 2.0
+
+  # ---------------- Whisper (STT, speaches = faster-whisper, API OpenAI /v1/audio/transcriptions) ----------------
+  whisper:
+    image: ${IMG_WHISPER:?IMG_WHISPER manquant (versions.env)}
+    restart: unless-stopped
+    <<: *gpu
+    # init: reaper PID 1 (le téléchargement du modèle tourne en tâche de fond du shell)
+    init: true
+    environment:
+      TZ: ${TZ:-Europe/Paris}
+      WHISPER_MODEL: ${WHISPER_MODEL:?WHISPER_MODEL manquant}
+      # Décharge le modèle de la VRAM après 300 s d'inactivité (partage de la carte avec le LLM)
+      WHISPER__TTL: "300"
+      ENABLE_UI: "false"
+    # speaches 0.8.x n'auto-télécharge pas: le modèle doit être installé via POST /v1/models/<id>.
+    # Ce wrapper (1) fait pointer l'alias OpenAI "whisper-1" (utilisé par Open WebUI) sur $WHISPER_MODEL,
+    # (2) démarre le serveur, (3) en tâche de fond télécharge le modèle (idempotent: 201 si déjà présent).
+    # Le healthcheck n'est vert que lorsque le modèle est installé.
+    command:
+      - bash
+      - -c
+      - |
+        set -e
+        printf '{"whisper-1":"%s"}\n' "$$WHISPER_MODEL" > model_aliases.json
+        (
+          until curl -fsS http://127.0.0.1:8000/health >/dev/null 2>&1; do sleep 2; done
+          until curl -fsS -X POST "http://127.0.0.1:8000/v1/models/$$WHISPER_MODEL"; do
+            echo "whisper: téléchargement de $$WHISPER_MODEL en échec, nouvel essai dans 15 s" >&2
+            sleep 15
+          done
+          echo "whisper: modèle $$WHISPER_MODEL prêt"
+        ) &
+        exec uvicorn --factory speaches.main:create_app
+    expose:
+      - "8000"
+    volumes:
+      # Cache Hugging Face (modèles faster-whisper) — voir PRÉREQUIS PERMISSIONS
+      - ${DATA_DIR:-./data}/whisper:/home/ubuntu/.cache/huggingface/hub
+    healthcheck:
+      # 200 seulement si le modèle est installé localement (GET /v1/models/<id> => 404 sinon)
+      test: ["CMD-SHELL", "curl -fsS \"http://127.0.0.1:8000/v1/models/$$WHISPER_MODEL\" >/dev/null"]
+      interval: 15s
+      timeout: 10s
+      retries: 60
+      start_period: 120s
+    networks: [ai_net]
+    logging: *default-logging
+    #   mem_limit: 8g
+    #   cpus: 4.0
+
+  # ---------------- ClickHouse (analytique Langfuse v4) ----------------
+  clickhouse:
+    image: ${IMG_CLICKHOUSE:?IMG_CLICKHOUSE manquant (versions.env)}
+    restart: unless-stopped
+    user: "101:101"
+    environment:
+      TZ: ${TZ:-Europe/Paris}
+      CLICKHOUSE_DB: default
+      CLICKHOUSE_USER: clickhouse
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:?CLICKHOUSE_PASSWORD manquant}
+    ulimits:
+      nofile:
+        soft: 262144
+        hard: 262144
+    expose:
+      - "8123"
+      - "9000"
+    volumes:
+      - ${DATA_DIR:-./data}/clickhouse/data:/var/lib/clickhouse
+      - ${DATA_DIR:-./data}/clickhouse/logs:/var/log/clickhouse-server
+    healthcheck:
+      # wget présent dans l'image (healthcheck identique au compose officiel Langfuse)
+      test: ["CMD-SHELL", "wget --no-verbose --tries=1 --spider http://127.0.0.1:8123/ping || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+    networks: [ai_net]
+    logging: *default-logging
+    #   mem_limit: 4g
+    #   cpus: 2.0
+
+  # ---------------- S3 (RustFS: API 9000, console 9001 via Caddy "stockage") ----------------
+  s3:
+    image: ${IMG_S3:?IMG_S3 manquant (versions.env)}
+    restart: unless-stopped
+    security_opt:
+      - "no-new-privileges:true"
+    environment:
+      TZ: ${TZ:-Europe/Paris}
+      RUSTFS_ACCESS_KEY: ${S3_ROOT_USER:?S3_ROOT_USER manquant}
+      RUSTFS_SECRET_KEY: ${S3_ROOT_PASSWORD:?S3_ROOT_PASSWORD manquant}
+      RUSTFS_VOLUMES: /data
+      RUSTFS_ADDRESS: 0.0.0.0:9000
+      RUSTFS_CONSOLE_ENABLE: "true"
+      RUSTFS_CONSOLE_ADDRESS: 0.0.0.0:9001
+    expose:
+      - "9000"
+      - "9001"
+    volumes:
+      # Utilisateur de l'image: uid 10001 — voir PRÉREQUIS PERMISSIONS
+      - ${DATA_DIR:-./data}/s3:/data
+    healthcheck:
+      # curl présent dans l'image; sondes API et console (identiques au compose upstream, sans TLS)
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:9000/health && curl -fsS http://127.0.0.1:9001/rustfs/console/health"]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+      start_period: 30s
+    networks: [ai_net]
+    logging: *default-logging
+    #   mem_limit: 2g
+    #   cpus: 2.0
+
+  # ---------------- s3-init (one-shot: crée le bucket "langfuse", idempotent) ----------------
+  s3-init:
+    image: ${IMG_S3_INIT:?IMG_S3_INIT manquant (versions.env)}
+    restart: "no"
+    depends_on:
+      s3:
+        condition: service_healthy
+    environment:
+      TZ: ${TZ:-Europe/Paris}
+      AWS_ACCESS_KEY_ID: ${S3_ROOT_USER:?S3_ROOT_USER manquant}
+      AWS_SECRET_ACCESS_KEY: ${S3_ROOT_PASSWORD:?S3_ROOT_PASSWORD manquant}
+      AWS_DEFAULT_REGION: us-east-1
+      # aws-cli v2 ajoute des checksums par défaut que les S3 non-AWS ne gèrent pas toujours
+      AWS_REQUEST_CHECKSUM_CALCULATION: when_required
+      AWS_RESPONSE_CHECKSUM_VALIDATION: when_required
+      S3_ENDPOINT: http://s3:9000
+      S3_BUCKET: langfuse
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        set -e
+        if aws --endpoint-url "$$S3_ENDPOINT" s3api head-bucket --bucket "$$S3_BUCKET" >/dev/null 2>&1; then
+          echo "s3-init: bucket $$S3_BUCKET déjà présent"
+        else
+          aws --endpoint-url "$$S3_ENDPOINT" s3api create-bucket --bucket "$$S3_BUCKET" \
+            || aws --endpoint-url "$$S3_ENDPOINT" s3api head-bucket --bucket "$$S3_BUCKET"
+          echo "s3-init: bucket $$S3_BUCKET créé"
+        fi
+        echo "s3-init OK"
+    networks: [ai_net]
+    logging: *default-logging
+
+  # ---------------- Langfuse worker (traitement asynchrone, port 3030) ----------------
+  langfuse-worker:
+    image: ${IMG_LANGFUSE_WORKER:?IMG_LANGFUSE_WORKER manquant (versions.env)}
+    restart: unless-stopped
+    depends_on: &langfuse-depends-on
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      clickhouse:
+        condition: service_healthy
+      s3-init:
+        condition: service_completed_successfully
+    environment: &langfuse-env
+      TZ: ${TZ:-Europe/Paris}
+      NEXTAUTH_URL: https://suivi-ia.${BASE_DOMAIN:-local}
+      # POSTGRES_PASSWORD doit être URL-safe (hex), il est inséré tel quel dans l'URL
+      DATABASE_URL: postgresql://postgres:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD manquant}@postgres:5432/langfuse
+      SALT: ${LANGFUSE_SALT:?LANGFUSE_SALT manquant}
+      ENCRYPTION_KEY: ${LANGFUSE_ENCRYPTION_KEY:?LANGFUSE_ENCRYPTION_KEY manquant}
+      TELEMETRY_ENABLED: "false"
+      CLICKHOUSE_MIGRATION_URL: clickhouse://clickhouse:9000
+      CLICKHOUSE_URL: http://clickhouse:8123
+      CLICKHOUSE_USER: clickhouse
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:?CLICKHOUSE_PASSWORD manquant}
+      CLICKHOUSE_CLUSTER_ENABLED: "false"
+      REDIS_HOST: redis
+      REDIS_PORT: "6379"
+      REDIS_AUTH: ${REDIS_PASSWORD:?REDIS_PASSWORD manquant}
+      # Stockage objet (RustFS): événements + médias dans le bucket "langfuse"
+      LANGFUSE_S3_EVENT_UPLOAD_BUCKET: langfuse
+      LANGFUSE_S3_EVENT_UPLOAD_REGION: auto
+      LANGFUSE_S3_EVENT_UPLOAD_ACCESS_KEY_ID: ${S3_ROOT_USER:?S3_ROOT_USER manquant}
+      LANGFUSE_S3_EVENT_UPLOAD_SECRET_ACCESS_KEY: ${S3_ROOT_PASSWORD:?S3_ROOT_PASSWORD manquant}
+      LANGFUSE_S3_EVENT_UPLOAD_ENDPOINT: http://s3:9000
+      LANGFUSE_S3_EVENT_UPLOAD_FORCE_PATH_STYLE: "true"
+      LANGFUSE_S3_EVENT_UPLOAD_PREFIX: events/
+      LANGFUSE_S3_MEDIA_UPLOAD_BUCKET: langfuse
+      LANGFUSE_S3_MEDIA_UPLOAD_REGION: auto
+      LANGFUSE_S3_MEDIA_UPLOAD_ACCESS_KEY_ID: ${S3_ROOT_USER:?S3_ROOT_USER manquant}
+      LANGFUSE_S3_MEDIA_UPLOAD_SECRET_ACCESS_KEY: ${S3_ROOT_PASSWORD:?S3_ROOT_PASSWORD manquant}
+      LANGFUSE_S3_MEDIA_UPLOAD_ENDPOINT: http://s3:9000
+      LANGFUSE_S3_MEDIA_UPLOAD_FORCE_PATH_STYLE: "true"
+      LANGFUSE_S3_MEDIA_UPLOAD_PREFIX: media/
+    expose:
+      - "3030"
+    healthcheck:
+      # wget présent dans l'image (UBI micro + wget, cf. Dockerfile); route /api/health du worker
+      test: ["CMD-SHELL", "wget -q --spider http://127.0.0.1:3030/api/health"]
+      interval: 20s
+      timeout: 10s
+      retries: 10
+      start_period: 120s
+    networks: [ai_net]
+    logging: *default-logging
+    #   mem_limit: 2g
+    #   cpus: 2.0
+
+  # ---------------- Langfuse web (UI + API, https://suivi-ia.${BASE_DOMAIN}) ----------------
+  langfuse-web:
+    image: ${IMG_LANGFUSE_WEB:?IMG_LANGFUSE_WEB manquant (versions.env)}
+    restart: unless-stopped
+    depends_on: *langfuse-depends-on
+    environment:
+      <<: *langfuse-env
+      NEXTAUTH_SECRET: ${NEXTAUTH_SECRET:?NEXTAUTH_SECRET manquant}
+      LANGFUSE_TRUSTED_PROXY_COUNT: "1"
+      AUTH_DISABLE_SIGNUP: "true"
+      # Initialisation headless: org, projet, clés API et compte admin (clés réutilisées par LiteLLM)
+      LANGFUSE_INIT_ORG_ID: ${LANGFUSE_INIT_ORG_ID:?LANGFUSE_INIT_ORG_ID manquant}
+      LANGFUSE_INIT_PROJECT_ID: ${LANGFUSE_INIT_PROJECT_ID:?LANGFUSE_INIT_PROJECT_ID manquant}
+      LANGFUSE_INIT_PROJECT_PUBLIC_KEY: ${LANGFUSE_INIT_PROJECT_PUBLIC_KEY:?LANGFUSE_INIT_PROJECT_PUBLIC_KEY manquant}
+      LANGFUSE_INIT_PROJECT_SECRET_KEY: ${LANGFUSE_INIT_PROJECT_SECRET_KEY:?LANGFUSE_INIT_PROJECT_SECRET_KEY manquant}
+      LANGFUSE_INIT_USER_EMAIL: ${LANGFUSE_INIT_USER_EMAIL:?LANGFUSE_INIT_USER_EMAIL manquant}
+      LANGFUSE_INIT_USER_PASSWORD: ${LANGFUSE_INIT_USER_PASSWORD:?LANGFUSE_INIT_USER_PASSWORD manquant}
+    expose:
+      - "3000"
+    healthcheck:
+      # Next.js standalone écoute sur $HOSTNAME (= IP du conteneur): ne pas sonder 127.0.0.1
+      test: ["CMD-SHELL", "wget -q --spider http://$${HOSTNAME}:3000/api/public/health"]
+      interval: 20s
+      timeout: 10s
+      retries: 10
+      start_period: 180s
+    networks: [ai_net]
+    logging: *default-logging
+    #   mem_limit: 4g
+    #   cpus: 2.0
+
 networks:
   ai_net:
     driver: bridge
