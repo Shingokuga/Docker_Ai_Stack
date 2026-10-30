@@ -494,10 +494,12 @@ services:
       BASE_DOMAIN: ${BASE_DOMAIN:-local}
       # Caddy stocke sous $XDG_DATA_HOME/caddy => /data/caddy (root CA: /data/caddy/pki/authorities/local/root.crt)
       XDG_DATA_HOME: /data
+      COMFYUI_BASE_URL: ${COMFYUI_BASE_URL:-http://comfyui:8188}
     volumes:
       - ./caddy/Caddyfile:/etc/caddy/Caddyfile:ro
       - ./caddy/certificat:/srv/certificat:ro
       - ${DATA_DIR:-./data}/caddy:/data/caddy
+      - ${DATA_DIR:-./data}/comfyui/output:/comfyui/output:ro
     healthcheck:
       # API admin locale (localhost:2019) via wget busybox
       test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:2019/config/"]
@@ -812,6 +814,48 @@ services:
     logging: *default-logging
     #   mem_limit: 4g
     #   cpus: 2.0
+
+  # ---------------- ComfyUI (génération d'images) ----------------
+  # Image communautaire yanwk/comfyui-boot: pré-installée avec les dépendances GPU,
+  # custom nodes et workflow UI. Les modèles sont fournis via le volume /models
+  # (téléchargés par download-models.sh). Exposé uniquement via Caddy (lot B).
+  comfyui:
+    image: yanwk/comfyui-boot:nightly-20261030-b1aa558
+    container_name: comfyui
+    profiles: ["comfyui"]
+    restart: unless-stopped
+    depends_on:
+      caddy:
+        condition: service_healthy
+    environment:
+      TZ: ${TZ:-Europe/Paris}
+      COMFYUI_USER: comfyui
+      COMFYUI_GROUP: comfyui
+      COMFYUI_USER_ID: "1000"
+      COMFYUI_GROUP_ID: "1000"
+      COMFYUI_START_COMMAND: "python /comfyui/main.py --listen 0.0.0.0 --port 8188 --disable-smart-memory"
+    volumes:
+      - /etc/localtime:/etc/localtime:ro
+      - /etc/timezone:/etc/timezone:ro
+      - ${DATA_DIR:-./data}/comfyui/models:/models
+      - ${DATA_DIR:-./data}/comfyui/user:/comfyui/user
+      - ${DATA_DIR:-./data}/comfyui/input:/comfyui/input
+      - ${DATA_DIR:-./data}/comfyui/output:/comfyui/output
+      - ${DATA_DIR:-./data}/comfyui/temp:/tmp/comfyui
+      - ${DATA_DIR:-./data}/comfyui/custom_nodes:/comfyui/custom_nodes
+    expose:
+      - "8188"
+    <<: *gpu
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8188/api/system_stats >/dev/null"]
+      interval: 20s
+      timeout: 10s
+      retries: 15
+      start_period: 120s
+    networks: [ai_net]
+    logging: *default-logging
+    #   mem_limit: 16g
+    #   cpus: 4.0
 
 networks:
   ai_net:

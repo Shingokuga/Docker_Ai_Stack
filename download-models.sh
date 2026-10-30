@@ -82,6 +82,50 @@ download_gguf
 ollama_pull
 wait_voice_models
 
+# -------------------------------------------------------
+# ComfyUI: modèles Qwen-Image 2.1
+# -------------------------------------------------------
+download_comfyui_models() {
+    info "Téléchargement des modèles ComfyUI (Qwen-Image 2.1)..."
+
+    local MODELS_DIR="${DATA_DIR}/comfyui/models"
+    local HF_BASE="https://huggingface.co/Comfy-Org/Qwen-Image-2.1/resolve/main"
+
+    # Créer tous les répertoires nécessaires
+    mkdir -p "${MODELS_DIR}/diffusion_models"
+    mkdir -p "${MODELS_DIR}/text_encoders"
+    mkdir -p "${MODELS_DIR}/vae"
+    mkdir -p "${MODELS_DIR}/loras"
+
+    # Qwen-Image 2.1 - diffusion models
+    info "Diffusion model (BF16)"
+    curl -L -C - -s -o "${MODELS_DIR}/diffusion_models/qwen_image_2.1_bf16.safetensors" \
+        "${HF_BASE}/diffusion_models/qwen_image_2.1_bf16.safetensors" || warn "Échec diffusion model BF16"
+
+    info "Diffusion model (INT8 ConvRot)"
+    curl -L -C - -s -o "${MODELS_DIR}/diffusion_models/qwen_image_2.1_int8_convrot.safetensors" \
+        "${HF_BASE}/diffusion_models/qwen_image_2.1_int8_convrot.safetensors" || warn "Échec diffusion model INT8"
+
+    # Text encoders (Qwen3.5 9B)
+    info "Text encoder (t2i)"
+    curl -L -C - -s -o "${MODELS_DIR}/text_encoders/qwen3.5_9b_qwen_image_2.1_pe_t2i.int8_convrot.safetensors" \
+        "${HF_BASE}/text_encoders/qwen3.5_9b_qwen_image_2.1_pe_t2i.int8_convrot.safetensors" || warn "Échec text encoder t2i"
+
+    # VAE
+    info "VAE"
+    curl -L -C - -s -o "${MODELS_DIR}/vae/qwen_image_2.1_vae_bf16.safetensors" \
+        "${HF_BASE}/vae/qwen_image_2.1_vae_bf16.safetensors" || warn "Échec VAE"
+
+    # LoRA (5 steps)
+    info "LoRA (P_Q_Image_2.1 5 steps)"
+    curl -L -C - -s -o "${MODELS_DIR}/loras/p_q_image_2.1_5_steps_v0.1_comfyui_bf16.safetensors" \
+        "${HF_BASE}/loras/p_q_image_2.1_5_steps_v0.1_comfyui_bf16.safetensors" || warn "Échec LoRA"
+
+    ok "Modèles ComfyUI téléchargés"
+}
+
+download_comfyui_models
+
 ok "Téléchargement des modèles terminé"
 echo ""
 echo "📋 Modèles disponibles :"

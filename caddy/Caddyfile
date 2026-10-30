@@ -79,6 +79,18 @@ stockage.{$BASE_DOMAIN} {
     reverse_proxy s3:9001
 }
 
+images.{$BASE_DOMAIN} {
+    tls internal
+    encode zstd gzip
+    header {
+        -Server
+        X-Content-Type-Options nosniff
+        Referrer-Policy no-referrer
+    }
+    reverse_proxy /api {$COMFYUI_BASE_URL}/api
+    reverse_proxy {$COMFYUI_BASE_URL}
+}
+
 http://certificat.{$BASE_DOMAIN} {
     handle /root.crt {
         root * /data/caddy/pki/authorities/local

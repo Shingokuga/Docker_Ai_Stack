@@ -6,4 +6,4 @@ documents
 api
 stockage
 certificat
-# images
+images
