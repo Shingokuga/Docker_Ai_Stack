@@ -41,3 +41,10 @@ Chaque nom DOIT être publié en mDNS par install.sh (avahi) => lot B lit la lis
 - Embeddings: Ollama embeddinggemma-2:latest (768d, ne JAMAIS changer après déploiement client).
 - Décision (n8n, pas chat): Ollama kev:9b-q4_K_M (les tags nvfp4 sont MLX=Apple, inutilisables).
 - LiteLLM config/litellm/config.yaml expose: chat (llama-server), embeddinggemma (ollama), + callbacks langfuse.
+
+## ComfyUI (profil comfyui) — exigence GPU (décision Kévin 2026-10-30)
+- Le service comfyui DOIT utiliser l'ancre x-gpu (NVIDIA), comme ollama / llama-server / docling-serve / whisper / kokoro. Sans GPU, génération d'image inutilisable.
+- Image: Dockerfile maison (aucune image officielle) depuis Comfy-Org/ComfyUI épinglé sur une release, PyTorch CUDA, amd64.
+- Démarrage avec --listen 0.0.0.0 --disable-smart-memory (décharge les modèles vers la RAM après usage => VRAM libérée pour le LLM). Libération explicite possible: POST http://comfyui:8188/free {"unload_models":true,"free_memory":true}.
+- Port interne 8188, exposé via Caddy sous images.${BASE_DOMAIN}. Open WebUI branché par env: ENABLE_IMAGE_GENERATION=true IMAGE_GENERATION_ENGINE=comfyui COMFYUI_BASE_URL=http://comfyui:8188 (+ COMFYUI_WORKFLOW / COMFYUI_WORKFLOW_NODES quand les workflows seront choisis).
+- Palier VRAM: sur GPU_TIER S/M, LLM et ComfyUI se partagent la carte tour à tour (smoke test à écrire); palier L: marge à mesurer.
