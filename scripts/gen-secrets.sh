@@ -78,6 +78,9 @@ fill_secret "LANGFUSE_ENCRYPTION_KEY" "openssl rand -hex 32"
 fill_secret "S3_ROOT_USER" "echo admin"
 fill_secret "S3_ROOT_PASSWORD" gen_hex
 
+# Obscura CDP token (48 caractères hex = 24 octets >= 32 octets requis)
+fill_secret "OBSCURA_CDP_TOKEN" gen_hex
+
 # Langfuse init headless
 fill_secret "LANGFUSE_INIT_ORG_ID" "echo org-default"
 fill_secret "LANGFUSE_INIT_PROJECT_ID" "echo proj-default"

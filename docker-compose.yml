@@ -347,6 +347,8 @@ services:
       EXECUTIONS_DATA_MAX_AGE: "168"
       N8N_DIAGNOSTICS_ENABLED: "false"
       N8N_VERSION_NOTIFICATIONS_DISABLED: "true"
+      OBSCURA_CDP_URL: ws://obscura:9222
+      OBSCURA_CDP_TOKEN: ${OBSCURA_CDP_TOKEN:?OBSCURA_CDP_TOKEN manquant}
     expose:
       - "5678"
     volumes:
@@ -497,6 +499,24 @@ services:
       timeout: 5s
       retries: 5
       start_period: 10s
+    networks: [ai_net]
+    logging: *default-logging
+    #   mem_limit: 512m
+    #   cpus: 1.0
+
+  # ---------------- Obscura (navigateur headless CDP pour Puppeteer/Playwright) ----------------
+  # Puppeteer/Playwright se connectent ici en CDP avec l'en-tête Authorization: Bearer <token>.
+  # Image distroless sans shell : aucun healthcheck shell possible.
+  obscura:
+    image: ${IMG_OBSCURA:?IMG_OBSCURA manquant (versions.env)}
+    restart: unless-stopped
+    security_opt:
+      - "no-new-privileges:true"
+    environment:
+      TZ: ${TZ:-Europe/Paris}
+      OBSCURA_CDP_TOKEN: ${OBSCURA_CDP_TOKEN:?OBSCURA_CDP_TOKEN manquant (>= 32 octets)}
+    expose:
+      - "9222"
     networks: [ai_net]
     logging: *default-logging
     #   mem_limit: 512m
