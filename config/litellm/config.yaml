@@ -1,0 +1,35 @@
+# ============================================================
+# LiteLLM — passerelle OpenAI-compatible (monté en /app/config.yaml, lecture seule)
+# Modèles exposés: chat (llama-server), embeddinggemma (Ollama).
+# Les clés/secrets viennent de l'environnement du conteneur (os.environ/...), jamais en dur ici.
+# Callback Langfuse: LANGFUSE_HOST / LANGFUSE_PUBLIC_KEY / LANGFUSE_SECRET_KEY (voir docker-compose.yml).
+# ============================================================
+model_list:
+  # Chat + vision + tool calling: llama.cpp (alias interne "chat" côté llama-server)
+  - model_name: chat
+    litellm_params:
+      model: openai/chat
+      api_base: http://llama-server:8080/v1
+      api_key: none
+
+  # Embeddings (768d) — ne JAMAIS changer de modèle après déploiement client
+  - model_name: embeddinggemma
+    litellm_params:
+      model: ollama/embeddinggemma-2:latest
+      api_base: http://ollama:11434
+
+  # ---- Exemple COMMENTÉ: provider cloud (décommenter, ajouter la clé dans .env + environment: de litellm) ----
+  # - model_name: cloud-chat
+  #   litellm_params:
+  #     model: openai/gpt-4o-mini            # ou anthropic/claude-..., mistral/..., gemini/...
+  #     api_key: os.environ/CLOUD_API_KEY    # variable à définir dans .env puis à passer au service litellm
+  #     # api_base: https://api.openai.com/v1
+
+litellm_settings:
+  success_callback: ["langfuse"]
+  failure_callback: ["langfuse"]
+  drop_params: true
+
+general_settings:
+  master_key: os.environ/LITELLM_MASTER_KEY
+  database_url: os.environ/DATABASE_URL
