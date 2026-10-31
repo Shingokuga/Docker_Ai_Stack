@@ -7,6 +7,21 @@ ok() { echo "✅ $*"; }
 warn() { echo "⚠️  $*"; }
 die() { echo "❌ $*"; exit 1; }
 
+# Vérifie si la GPU supporte le modèle NVFP4 (Blackwell, compute cap 10+)
+check_blackwell_for_nvfp4() {
+    local cap
+    cap=$(nvidia-smi --query-gpu=compute_cap --format=csv,noheader 2>/dev/null | head -1)
+    if [ -z "$cap" ]; then
+        return 0
+    fi
+    # Extraire la partie entière du compute cap
+    local major="${cap%%.*}"
+    if [ "$major" -lt 10 ] 2>/dev/null; then
+        warn "Le modèle qwen-image-2.1-UC-NVFP4 exige une carte NVIDIA Blackwell (compute capability 10 ou plus). Sur cette carte il ne fonctionnera pas : prévoir une variante fp8 ou int8."
+    fi
+    return 0
+}
+
 # -------------------------------------------------------
 # Lecture de .env clé par clé (pas de source)
 # -------------------------------------------------------
@@ -143,6 +158,8 @@ download_comfyui_models() {
         info "Profil comfyui non activé (COMPOSE_PROFILES='${compose_profiles:-<vide>}')"
         return 0
     fi
+
+    check_blackwell_for_nvfp4
 
     info "Téléchargement des modèles ComfyUI (Qwen-Image 2.1)..."
 
