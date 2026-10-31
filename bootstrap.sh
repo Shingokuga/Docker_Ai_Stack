@@ -139,15 +139,21 @@ if command -v nvidia-smi >/dev/null 2>&1; then
         info "Installation de nvidia-container-toolkit"
         $SUDO curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey \
             | $SUDO gpg --dearmor -o /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg
-        $SUDO curl -s -L https://nvidia.github.io/libnvidia-container/ubuntu/${VERSION_CODENAME}/libnvidia-container.list \
+        $SUDO curl -fsSL https://nvidia.github.io/libnvidia-container/stable/deb/nvidia-container-toolkit.list \
             | $SUDO sed "s|deb https://|deb [signed-by=/usr/share/keyrings/nvidia-container-toolkit-keyring.gpg] https://|g" \
             | $SUDO tee /etc/apt/sources.list.d/nvidia-container-toolkit.list
         $SUDO apt update -y
         $SUDO apt install -y nvidia-container-toolkit
     fi
 
-    $SUDO nvidia-ctk runtime configure --runtime=docker
-    $SUDO systemctl restart docker
+    if ! docker info --format '{{json .Runtimes}}' | grep -q '"nvidia"'; then
+        info "Configuration du runtime NVIDIA pour Docker"
+        $SUDO nvidia-ctk runtime configure --runtime=docker
+        $SUDO systemctl restart docker
+        ok "Runtime NVIDIA configuré et Docker redémarré"
+    else
+        info "Runtime NVIDIA déjà configuré — pas de redémarrage de Docker"
+    fi
     ok "GPU NVIDIA configuré"
 else
     warn "nvidia-smi non trouvé — les services GPU ne démarreront pas"
