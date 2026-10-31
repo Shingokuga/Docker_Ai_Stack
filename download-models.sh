@@ -3,7 +3,7 @@
 # Utilise .env pour les paramètres. Ne télécharge pas les images Docker.
 set -euo pipefail
 
-cd "$(dirname "$0")"
+cd "$(dirname "${BASH_SOURCE[0]}")"
 
 info() { echo "ℹ  $*"; }
 ok() { echo "✅ $*"; }
@@ -79,7 +79,7 @@ fi
 # -------------------------------------------------------
 # Mode --select-only : définir LLM_GGUF dans .env, ne pas télécharger
 # -------------------------------------------------------
-if [ "${1:-}" = "--select-only" ]; then
+if [ "${1:-}" = "--select-only" ] || [ "${SELECT_ONLY:-}" = "1" ]; then
     info "Mode --select-only: aucun téléchargement"
     ok "LLM_GGUF=${LLM_GGUF}"
     exit 0
@@ -104,16 +104,27 @@ download_file() {
     fi
 
     info "Téléchargement: $label"
-    if curl -L -C - -s -o "$dest" "$url"; then
-        if [ -f "$dest" ]; then
-            downloaded_files["$label"]="$dest"
-            ok "$label"
-            return 0
-        fi
+    local part="${dest}.part"
+
+    # Progression : -# si stderr est un terminal, sinon -sS
+    local curl_flags="-fL -C - --retry 5 --retry-delay 5"
+    if [ -t 2 ]; then
+        curl_flags="$curl_flags -#"
+    else
+        curl_flags="$curl_flags -sS"
     fi
-    warn "Échec du téléchargement de $label"
-    missing_files["$label"]="$url"
-    return 1
+
+    if curl $curl_flags -o "$part" "$url"; then
+        mv "$part" "$dest"
+        downloaded_files["$label"]="$dest"
+        ok "$label"
+        return 0
+    else
+        local code=$?
+        warn "Échec du téléchargement de $label (code $code)"
+        missing_files["$label"]="$url"
+        return $code
+    fi
 }
 
 # -------------------------------------------------------
@@ -199,11 +210,18 @@ verify_downloads() {
 # -------------------------------------------------------
 # Main
 # -------------------------------------------------------
-download_gguf
-download_comfyui_models
-verify_downloads
+main() {
+    download_gguf
+    download_comfyui_models
+    verify_downloads
 
-echo ""
-echo "📋 Modèles disponibles :"
-echo "  Chat: $LLM_GGUF (via llama-server)"
-echo "  Vision: $LLM_MMPROJ"
+    echo ""
+    echo "📋 Modèles disponibles :"
+    echo "  Chat: $LLM_GGUF (via llama-server)"
+    echo "  Vision: $LLM_MMPROJ"
+}
+
+# Run main only if executed directly (not sourced)
+if [ "$BASH_SOURCE" = "$0" ]; then
+    main "$@"
+fi
