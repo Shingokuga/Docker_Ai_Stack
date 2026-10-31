@@ -6,27 +6,23 @@
 # Options :
 #   --yes          Mode sans interaction (utilise les variables d'environnement BASE_DOMAIN, ADMIN_EMAIL, ENABLE_COMFYUI, GPU_TIER)
 #   --config-only  S'arrête après la validation de la configuration (ne télécharge, ne crée et ne lance rien d'autre)
-set -euo pipefail
-
-REPO_ROOT="$(cd "$(dirname "$0")" && pwd)"
-cd "$REPO_ROOT"
-
 info() { echo "ℹ  $*"; }
 ok() { echo "✅ $*"; }
 warn() { echo "⚠️  $*"; }
 err() { echo "❌ $*" >&2; }
 
-# -------------------------------------------------------
-# Options
-# -------------------------------------------------------
 YES_MODE=0
 CONFIG_ONLY=0
-for arg in "$@"; do
-    case "$arg" in
-        --yes) YES_MODE=1 ;;
-        --config-only) CONFIG_ONLY=1 ;;
-    esac
-done
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE:-$0}")" && pwd)"
+
+parse_args() {
+    for arg in "$@"; do
+        case "$arg" in
+            --yes) YES_MODE=1 ;;
+            --config-only) CONFIG_ONLY=1 ;;
+        esac
+    done
+}
 
 # -------------------------------------------------------
 # a) Vérification des prérequis
@@ -241,12 +237,7 @@ validate_config() {
         exit 1
     fi
     ok "Configuration valide"
-
-    if [ $CONFIG_ONLY -eq 1 ]; then
-        ok "Mode --config-only : arrêt après validation"
-        return 0
-    fi
-    return 1
+    return 0
 }
 
 # -------------------------------------------------------
@@ -359,6 +350,10 @@ final_summary() {
 # Main
 # -------------------------------------------------------
 main() {
+    parse_args "$@"
+    set -euo pipefail
+    cd "$REPO_ROOT"
+
     echo "=============================================="
     echo "Stack Universelle AI — Installation"
     echo "=============================================="
@@ -368,6 +363,12 @@ main() {
     ask_config
     create_env
     validate_config
+
+    if [ $CONFIG_ONLY -eq 1 ]; then
+        ok "Mode --config-only : arrêt après validation"
+        return 0
+    fi
+
     download_models
     create_data_dirs
     start_stack
@@ -375,4 +376,6 @@ main() {
     final_summary
 }
 
-main "$@"
+if [ "${BASH_SOURCE}" = "$0" ]; then
+    main "$@"
+fi
