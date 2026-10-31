@@ -20,6 +20,7 @@
 #
 # Options :
 #   GITHUB_TOKEN   Jeton d'accès pour un dépôt GitHub privé.
+# Arguments : tout argument est transmis à install.sh (ex. : bash bootstrap.sh --yes --no-gpu).
 #   STACK_BRANCH   Branche à cloner (défaut : main). Ex. : dev.
 #   STACK_REPO_URL URL du dépôt (défaut : Shingokuga/Docker_Ai_Stack).
 #   STACK_DIR      Répertoire de destination (défaut : $HOME/Docker_Ai_Stack).
@@ -227,8 +228,8 @@ else
             echo "Si le dépôt est privé, définissez GITHUB_TOKEN :"
             echo "  GITHUB_TOKEN=votre-jeton ./bootstrap.sh"
             echo ""
-            echo "Pour créer un token : https://github.com/settings/tokens/new"
-            echo "(scope : repo)"
+            echo "Pour créer un jeton, suivez l'aide en tête de ce script :"
+            echo "jeton fine-grained en lecture seule (Contents) sur le seul dépôt Docker_Ai_Stack."
             exit 1
         else
             err "Clonage du dépôt privé échoué (GITHUB_TOKEN défini)."
@@ -249,8 +250,15 @@ echo "=============================================="
 echo ""
 
 # Si on n'est pas dans le groupe docker, on utilise sg pour éviter le problème
+# Transmettre tous les arguments à install.sh
 if groups | grep -q docker; then
-    bash "$STACK_DIR/install.sh"
+    bash "$STACK_DIR/install.sh" "$@"
 else
-    sg docker -c "bash $STACK_DIR/install.sh"
+    # Construire la commande avec printf '%q' pour chaque argument
+    CMD="bash"
+    CMD="$CMD $(printf '%q ' "$STACK_DIR/install.sh")"
+    for arg in "$@"; do
+        CMD="$CMD $(printf '%q ' "$arg")"
+    done
+    sg docker -c "$CMD"
 fi
