@@ -3,13 +3,18 @@
 # Prérequis système, installation Docker/GPU, clonage du dépôt, puis installation.
 #
 # Usage pour un dépôt privé (GitHub) :
-#   1. Exportez un jeton personnel GitHub (scope: repo) :
-#        export GITHUB_TOKEN=ghp_xxxxxxxx
-#   2. Téléchargez ce script :
+#   1. Créez un jeton fine-grained en lecture seule :
+#        GitHub → Settings → Developer settings → Personal access tokens → Fine-grained tokens
+#        Repository access : Only select repositories → Docker_Ai_Stack
+#        Permissions : Contents → Read-only
+#        Expiration : 7 jours (ou à votre convenance)
+#   2. Exportez le jeton :
+#        export GITHUB_TOKEN=github_pat_xxxxxxxx
+#   3. Téléchargez ce script :
 #        curl -fsSL -H "Authorization: Bearer ***" \
 #             https://raw.githubusercontent.com/Shingokuga/Docker_Ai_Stack/main/bootstrap.sh \
 #             -o bootstrap.sh
-#   3. Exécutez-le :
+#   4. Exécutez-le :
 #        bash bootstrap.sh
 #   (Note : la ligne de téléchargement n'a pas encore été testée avec un vrai jeton.)
 #
@@ -179,9 +184,17 @@ fi
 # Permissions Docker
 # -------------------------------------------------------
 if ! groups | grep -q docker; then
-    info "Ajout de $USER au groupe docker"
-    $SUDO usermod -aG docker "$USER"
-    warn "Le groupe docker sera actif à la prochaine connexion"
+    DOCKER_USER="${SUDO_USER:-${USER:-}}"
+    if [ -z "$DOCKER_USER" ]; then
+        DOCKER_USER=$(id -un)
+    fi
+    if [ "$DOCKER_USER" = "root" ]; then
+        info "Utilisateur root — pas besoin de l'ajouter au groupe docker"
+    else
+        info "Ajout de $DOCKER_USER au groupe docker"
+        $SUDO usermod -aG docker "$DOCKER_USER"
+        warn "Le groupe docker sera actif à la prochaine connexion pour $DOCKER_USER"
+    fi
 fi
 ok "Groupe docker configuré"
 
