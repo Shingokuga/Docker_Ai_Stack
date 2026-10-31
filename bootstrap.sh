@@ -6,7 +6,7 @@
 #   1. Exportez un jeton personnel GitHub (scope: repo) :
 #        export GITHUB_TOKEN=ghp_xxxxxxxx
 #   2. Téléchargez ce script :
-#        curl -fsSL -H "Authorization: Bearer $GITHUB_TOKEN" \
+#        curl -fsSL -H "Authorization: Bearer ***" \
 #             https://raw.githubusercontent.com/Shingokuga/Docker_Ai_Stack/main/bootstrap.sh \
 #             -o bootstrap.sh
 #   3. Exécutez-le :
@@ -25,6 +25,22 @@ info() { echo "ℹ  $*"; }
 ok() { echo "✅ $*"; }
 warn() { echo "⚠️  $*"; }
 err() { echo "❌ $*" >&2; }
+
+# -------------------------------------------------------
+# Fonction d'authentification git pour dépôts privés
+# Utilise une variable d'environnement pour l'en-tête — le jeton
+# n'est jamais écrit dans l'URL, un argument de commande ou un fichier.
+# -------------------------------------------------------
+git_auth() {
+    if [ -n "${GITHUB_TOKEN:-}" ]; then
+        GIT_CONFIG_COUNT=1 \
+        GIT_CONFIG_KEY_0=http.extraHeader \
+        GIT_CONFIG_VALUE_0="Authorization: Basic $(echo -n "x-access-token:${GITHUB_TOKEN}" | base64 -w0)" \
+        git "$@"
+    else
+        git "$@"
+    fi
+}
 
 # -------------------------------------------------------
 # Configuration
@@ -184,22 +200,15 @@ ok "git-lfs installé"
 if [ -d "$STACK_DIR" ]; then
     info "Répertoire $STACK_DIR existe — mise à jour sur la branche $STACK_BRANCH..."
     cd "$STACK_DIR"
-    if [ -n "${GITHUB_TOKEN:-}" ]; then
-        GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=http.extraHeader GIT_CONFIG_VALUE_0="Authorization: Basic $(printf 'x-access-token:%s' "$GITHUB_TOKEN" | base64 -w0)" git fetch origin "$STACK_BRANCH"
-    else
-        git fetch origin "$STACK_BRANCH"
-    fi
+    git_auth fetch origin "$STACK_BRANCH"
     git checkout "$STACK_BRANCH"
-    git pull --ff-only origin "$STACK_BRANCH"
+    git_auth pull --ff-only origin "$STACK_BRANCH"
 else
     info "Clonage de $STACK_REPO_URL (branche : $STACK_BRANCH) vers $STACK_DIR..."
     mkdir -p "$(dirname "$STACK_DIR")"
 
-    if [ -n "${GITHUB_TOKEN:-}" ]; then
-        # Authentification via variable d'environnement — jeton non écrit dans aucun fichier
-        GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=http.extraHeader GIT_CONFIG_VALUE_0="Authorization: Basic $(printf 'x-access-token:%s' "$GITHUB_TOKEN" | base64 -w0)" git clone --branch "$STACK_BRANCH" "$STACK_REPO_URL" "$STACK_DIR"
-    else
-        if ! git clone --branch "$STACK_BRANCH" "$STACK_REPO_URL" "$STACK_DIR" 2>/dev/null; then
+    if ! git_auth clone --branch "$STACK_BRANCH" "$STACK_REPO_URL" "$STACK_DIR" 2>/dev/null; then
+        if [ -z "${GITHUB_TOKEN:-}" ]; then
             err "Clonage du dépôt échoué."
             echo ""
             echo "Si le dépôt est privé, définissez GITHUB_TOKEN :"
@@ -208,11 +217,13 @@ else
             echo "Pour créer un token : https://github.com/settings/tokens/new"
             echo "(scope : repo)"
             exit 1
+        else
+            err "Clonage du dépôt privé échoué (GITHUB_TOKEN défini)."
+            exit 1
         fi
     fi
 fi
 cd "$STACK_DIR"
-git lfs pull
 ok "Dépôt prêt à $STACK_DIR"
 
 # -------------------------------------------------------
