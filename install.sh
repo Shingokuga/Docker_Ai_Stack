@@ -61,26 +61,62 @@ verify_prereqs() {
 # b) Détection du palier GPU
 # -------------------------------------------------------
 detect_gpu_tier() {
+    local vram_mb=""
+
+    # Essayer nvidia-smi avec nounits
     if command -v nvidia-smi >/dev/null 2>&1; then
-        # Vérifier la VRAM
-        local vram_mb
-        vram_mb=$(nvidia-smi --query-gpu=memory.total --format=csv,noheader 2>/dev/null | head -1 | tr -d ' ')
-        if [ -n "$vram_mb" ] && [ "$vram_mb" -gt 0 ]; then
-            info "VRAM détectée : ${vram_mb} MB"
-            if [ "$vram_mb" -ge 16384 ]; then
-                info "Palier GPU détecté : L (≥16 Go VRAM)"
-                return "L"
-            else
-                info "Palier GPU détecté : M (<16 Go VRAM)"
-                return "M"
-            fi
+        if vram_mb=$(nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits 2>/dev/null | head -1 | tr -d ' '); then
+            :
         else
-            info "Impossible de détecter la VRAM — palier M par défaut"
+            info "nvidia-smi a échoué — palier S par défaut"
+            echo "S"
+            return
         fi
     else
-        info "Aucun GPU détecté — palier M par défaut"
+        info "nvidia-smi absent — palier S par défaut"
+        echo "S"
+        return
     fi
-    return "M"
+
+    # Vérifier si c'est un nombre valide
+    if ! [ "$vram_mb" -gt 0 ] 2>/dev/null; then
+        # Retirer les unités éventuelles (MiB)
+        if [ -n "$vram_mb" ]; then
+            vram_mb=$(echo "$vram_mb" | tr -d 'MiB' | tr -d ' ')
+        fi
+        if ! [ "$vram_mb" -gt 0 ] 2>/dev/null; then
+            # Fallback sur /proc/meminfo
+            if [ -f /proc/meminfo ]; then
+                local mem_kb
+                mem_kb=$(/usr/bin/grep -m1 '^MemTotal:' /proc/meminfo | /usr/bin/awk '{print $2}')
+                if [ -n "$mem_kb" ]; then
+                    vram_mb=$(( mem_kb / 1024 ))
+                    info "Mémoire système détectée : ${vram_mb} MB"
+                fi
+            fi
+        fi
+    else
+        info "VRAM détectée : ${vram_mb} MB"
+    fi
+
+    # Si toujours pas de valeur, palier S
+    if ! [ "$vram_mb" -gt 0 ] 2>/dev/null; then
+        info "Impossible de détecter la mémoire — palier S par défaut"
+        echo "S"
+        return
+    fi
+
+    # Paliers : L ≥ 24 Go, M ≥ 8 Go, sinon S
+    if [ "$vram_mb" -ge 24576 ]; then
+        info "Palier GPU détecté : L (≥24 Go)"
+        echo "L"
+    elif [ "$vram_mb" -ge 8192 ]; then
+        info "Palier GPU détecté : M (8 à 24 Go)"
+        echo "M"
+    else
+        info "Palier GPU détecté : S (<8 Go)"
+        echo "S"
+    fi
 }
 
 # -------------------------------------------------------
@@ -125,32 +161,14 @@ ask_config() {
 
     # GPU Tier
     if [ $YES_MODE -eq 1 ]; then
-        GPU_TIER="${GPU_TIER:-M}"
+        GPU_TIER="${GPU_TIER:-$(detect_gpu_tier)}"
     else
         local detected
-        detect_gpu_tier
-        detected=$?
-        if [ "$detected" -eq 0 ]; then
-            detected="L"
-        else
-            detected="M"
-        fi
+        detected=$(detect_gpu_tier)
         info "Palier GPU détecté : $detected"
-        read -r -e -p "Palier GPU (M/S/L) — S=<8Go, M=8-16Go, L=≥16Go : " -i "$detected" GPU_TIER
+        read -r -e -p "Palier GPU (M/S/L) — S=<8Go, M=8-24Go, L=≥24Go : " -i "$detected" GPU_TIER
         GPU_TIER=$(echo "$GPU_TIER" | tr '[:lower:]' '[:upper:]')
     fi
-
-    # Choix du modèle LLM selon le palier GPU
-    case "$GPU_TIER" in
-        L)
-            LLM_GGUF="Qwen3.8-27B-TURBO-Fable-Cold-Fusion-735-882-Heretic-Uncensored-NEO-CODER-MAX-MTP-Q4_K_M.gguf"
-            ;;
-        *)
-            LLM_GGUF="Qwen3.5-9B-The-Defiant-Fable-Uncensored-Heretic-NEO-IMATRIX-MAX-MTP-Q4_K_M.gguf"
-            ;;
-    esac
-
-    info "Modèle LLM sélectionné : $LLM_GGUF"
 }
 
 # -------------------------------------------------------
@@ -169,7 +187,6 @@ create_env() {
     sed -i "s|^WEBUI_ADMIN_EMAIL=.*|WEBUI_ADMIN_EMAIL=${ADMIN_EMAIL}|" .env
     sed -i "s|^LANGFUSE_INIT_USER_EMAIL=.*|LANGFUSE_INIT_USER_EMAIL=${ADMIN_EMAIL}|" .env
     sed -i "s|^GPU_TIER=.*|GPU_TIER=${GPU_TIER}|" .env
-    sed -i "s|^LLM_GGUF=.*|LLM_GGUF=${LLM_GGUF}|" .env
 
     if [ "$COMFYUI_ENABLED" -eq 1 ]; then
         COMPOSE_PROFILES="comfyui"
@@ -177,6 +194,17 @@ create_env() {
         COMPOSE_PROFILES=""
     fi
     sed -i "s|^COMPOSE_PROFILES=.*|COMPOSE_PROFILES=${COMPOSE_PROFILES}|" .env
+
+    # Sélection des modèles via download-models.sh --select-only
+    info "Sélection des modèles selon GPU_TIER=$GPU_TIER..."
+    if ! bash download-models.sh --select-only; then
+        err "Sélection des modèles échouée (download-models.sh --select-only)."
+        exit 1
+    fi
+
+    # Lire les modèles sélectionnés dans .env
+    LLM_GGUF=$(/usr/bin/grep -m1 '^LLM_GGUF=' .env | /usr/bin/cut -d'=' -f2-)
+    LLM_MMPROJ=$(/usr/bin/grep -m1 '^LLM_MMPROJ=' .env | /usr/bin/cut -d'=' -f2-)
 
     # Générer les secrets si nécessaire
     if [ -f scripts/gen-secrets.sh ]; then
@@ -196,6 +224,7 @@ create_env() {
     echo "Email admin : $ADMIN_EMAIL"
     echo "Palier GPU : $GPU_TIER"
     echo "Modèle LLM : $LLM_GGUF"
+    echo "Modèle vision : $LLM_MMPROJ"
     echo "ComfyUI : $([ "$COMFYUI_ENABLED" -eq 1 ] && echo "activé" || echo "désactivé")"
     echo "COMPOSE_PROFILES : $COMPOSE_PROFILES"
     echo "=============================================="
