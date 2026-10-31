@@ -494,7 +494,7 @@ services:
       BASE_DOMAIN: ${BASE_DOMAIN:-local}
       # Caddy stocke sous $XDG_DATA_HOME/caddy => /data/caddy (root CA: /data/caddy/pki/authorities/local/root.crt)
       XDG_DATA_HOME: /data
-      COMFYUI_BASE_URL: ${COMFYUI_BASE_URL:-http://comfyui:8188}
+
     volumes:
       - ./caddy/Caddyfile:/etc/caddy/Caddyfile:ro
       - ./caddy/certificat:/srv/certificat:ro

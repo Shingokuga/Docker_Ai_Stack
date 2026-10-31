@@ -87,8 +87,7 @@ images.{$BASE_DOMAIN} {
         X-Content-Type-Options nosniff
         Referrer-Policy no-referrer
     }
-    reverse_proxy /api {$COMFYUI_BASE_URL}/api
-    reverse_proxy {$COMFYUI_BASE_URL}
+    reverse_proxy comfyui:8188
 }
 
 http://certificat.{$BASE_DOMAIN} {

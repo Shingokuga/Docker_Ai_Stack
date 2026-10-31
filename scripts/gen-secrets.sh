@@ -39,6 +39,10 @@ gen_pass() {
     echo "$(gen_base64 | head -c 16)"
 }
 
+gen_sk_prefix() {
+    echo "sk-$(gen_base64)"
+}
+
 fill_secret() {
     local key="$1"
     local generator="$2"
@@ -63,7 +67,7 @@ fill_secret "CLICKHOUSE_PASSWORD" gen_hex
 
 # Secrets base64
 fill_secret "QDRANT_API_KEY" gen_base64
-fill_secret "LITELLM_MASTER_KEY" gen_base64
+fill_secret "LITELLM_MASTER_KEY" gen_sk_prefix
 fill_secret "LITELLM_SALT_KEY" gen_base64
 fill_secret "WEBUI_SECRET_KEY" gen_base64
 fill_secret "N8N_ENCRYPTION_KEY" gen_base64
@@ -88,8 +92,7 @@ fill_secret "OBSCURA_MCP_TOKEN" gen_hex
 gen_pass24() {
     openssl rand -base64 32 | tr -d '/+=' | head -c 32
 }
-# Email : valeur fixe par défaut (pas aléatoire) pour la simplicité
-grep -qE "^WEBUI_ADMIN_EMAIL=[^=]$" "$ENV_FILE" || sed -i "s|^WEBUI_ADMIN_EMAIL=|WEBUI_ADMIN_EMAIL=admin@stack.local|" "$ENV_FILE"
+fill_secret "WEBUI_ADMIN_EMAIL" "echo admin@stack.local"
 fill_secret "WEBUI_ADMIN_PASSWORD" gen_pass24
 
 # Langfuse init headless
