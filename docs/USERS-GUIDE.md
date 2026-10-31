@@ -1,231 +1,127 @@
 # Guide utilisateur
 
-## Open WebUI — Interface de chat IA
+## Accès et certificat
 
-### Accès
+Chaque service est accessible en HTTPS sur un sous-domaine de `<hôte>.<BASE_DOMAIN>` (BASE_DOMAIN est défini dans le fichier `.env`, valeur par défaut `local`). Caddy utilise un certificat TLS interne auto-signé.
 
-Se connecter à `https://chat-ai.{BASE_DOMAIN}` avec les credentials admin configurés dans `.env`.
-
-### Fonctionnalités
-
-- **Chat conversationnel** avec le LLM local
-- **Outils MCP** pour navigation web et documentation
-- **Support multimédia** (images, audio)
-- **Gestion des conversations** (historique, export)
-
-### Utilisation des outils MCP
-
-Pour utiliser les outils MCP (Obscura, Context7) dans une conversation:
-
-1. Dans le chat, taper `/tools` ou cliquer sur l'icône "Outils"
-2. Cocher les outils à activer pour cette conversation
-3. Les outils seront automatiquement invoqués par le LLM quand nécessaire
-
-#### Navigateur web (Obscura)
-
-Le LLM peut naviguer sur internet pour vous:
-- "Quelle est la météo à Paris?"
-- "Résume cet article: [URL]"
-- "Remplis ce formulaire: [URL]"
-
-#### Documentation (Context7)
-
-Le LLM peut rechercher de la documentation technique:
-- "Comment utiliser React Router v6?"
-- "Donne-moi un exemple de code avec FastAPI"
-
-### Limites
-
-- Les outils MCP sont réservés aux comptes **admin**
-- Une seule session de navigation Obscura à la fois (serveur mono-séance)
-- Nécessite une connexion internet
-
-## ComfyUI — Génération d'images
-
-### Accès
-
-Se connecter à `https://images.{BASE_DOMAIN}`.
-
-### Génération d'image depuis le texte
-
-1. Charger le workflow `text-to-image.json` (menu Load)
-2. Modifier le champ "prompt" avec votre description
-3. Cliquer sur "Queue Prompt"
-4. Attendre la génération (quelques secondes à plusieurs minutes selon le modèle)
-
-### Exemple de prompt
+Pour installer le certificat racine dans votre navigateur :
 
 ```
-A futuristic city at sunset, neon lights reflecting on wet streets,
-cyberpunk style, highly detailed, 4K resolution
+http://certificat.<BASE_DOMAIN>/root.crt
 ```
 
-### Modification d'image
+Si vous n'utilisez pas DNS, ajoutez une entrée dans le fichier `hosts` de votre poste. Cette étape est conseillée en fin d'installation.
 
-1. Charger le workflow `image-to-image.json`
-2.Uploader votre image source
-3. Modifier le prompt pour décrire les changements souhaités
-4. Lancer la génération
+Sans adresse publique (internes au réseau Docker uniquement) : whisper, kokoro, searxng, ollama, qdrant.
 
-### Stockage des outputs
+## Open WebUI
 
-Les images générées sont stockées dans:
-- Local: `data/comfyui/output/`
-- Web: `https://images.{BASE_DOMAIN}/output/`
+**Adresse** : `https://chat-ai.<BASE_DOMAIN>`
 
-## Whisper — Transcription audio
+Chat IA avec LLM local, recherche web et outils MCP.
 
-### API
+**Connexion** : compte admin créé au premier démarrage. Les credentials sont les valeurs de `WEBUI_ADMIN_EMAIL` et `WEBUI_ADMIN_PASSWORD` dans `.env`.
 
-Whisper expose une API compatible OpenAI sur `http://whisper:9000`.
+**Fonctionnalités configurées** :
 
-### Exemple de transcription
+- **Voix** : transcription audio via Whisper en entrée (modèle `whisper-1` = `Systran/faster-whisper-large-v3`) et synthèse vocale via Kokoro en sortie (voix par défaut `ff_siwis`).
+- **Recherche web** : activée, moteur SearXNG.
+- **RAG** : embeddings `embeddinggemma` via LiteLLM, base vectorielle Qdrant.
+- **Outils MCP** : Obscura (navigateur) ; Context7 (documentation technique, uniquement si `CONTEXT7_API_KEY` est renseignée dans `.env`). La configuration et l'utilisation des outils MCP sont détaillées dans `docs/OPEN-WEBUI-OUTILS.md`.
+
+## ComfyUI
+
+**Adresse** : `https://images.<BASE_DOMAIN>` (uniquement si `COMPOSE_PROFILES=comfyui` est défini dans `.env`)
+
+Génération d'images IA avec Qwen-Image 2.1.
+
+Les workflows au format API sont fournis dans le dépôt :
+
+- `comfyui/workflows/text-to-image.json` — génération à partir de texte
+- `comfyui/workflows/image-to-image.json` — modification d'image (2 images en entrée ; le workflow peut en recevoir jusqu'à 10)
+
+Ces fichiers ne sont pas montés dans le conteneur. Les images générées sont écrites dans le répertoire `data/comfyui/output` sur le serveur (pas de route web dédiée).
+
+Détails d'interface : à vérifier. API : voir `docs/PROFILE-COMFYUI.md`.
+
+## Voix (Whisper et Kokoro)
+
+Services internes sans adresse publique, utilisés par Open WebUI.
+
+### Whisper (transcription)
+
+**Adresse interne** : `http://whisper:8000`
+
+- `POST /v1/audio/transcriptions` — transcrire un audio (modèle `whisper-1`)
+
+### Kokoro (synthèse vocale)
+
+**Adresse interne** : `http://kokoro:8880`
+
+- `POST /v1/audio/speech` — synthétiser un audio
+- `GET /v1/audio/voices` — liste des voix disponibles
+- Voix par défaut : `ff_siwis` (Open WebUI l'appelle avec `model=kokoro`)
+
+Exemple d'appel Kokoro (depuis un conteneur du réseau Docker ; format de sortie à vérifier) :
 
 ```bash
-# Envoyer un fichier audio pour transcription
-curl -X POST http://whisper:9000/v1/audio/transcriptions \
-  -H "Authorization: Bearer sk-xxxxxxx" \
-  -F "file=@mon_audio.mp3" \
-  -F "model=large-v3"
-
-# Réponse JSON
-{
-  "text": "Bonjour, je suis un audio en français qui est transcrit."
-}
-```
-
-### Formats supportés
-
-- mp3, wav, flac, ogg, m4a, webm
-
-## Kokoro — Synthèse vocale
-
-### API
-
-Kokoro expose une API sur `http://kokoro:8000`.
-
-### Exemple de synthèse
-
-```bash
-# Générer de l'audio depuis du texte
-curl -X POST http://kokoro:8000/api/tts \
+curl -X POST http://kokoro:8880/v1/audio/speech \
   -H "Content-Type: application/json" \
-  -d '{
-    "text": "Bonjour, je suis une voix synthétisée.",
-    "voice": "ff_siwis",
-    "format": "wav"
-  }' \
-  --output sortie.wav
+  -d '{"model":"kokoro","input":"Bonjour","voice":"ff_siwis"}'
 ```
 
-### Voix disponibles
+## Docling
 
-- `ff_siwis` — Voix française par défaut
-- Autres voix disponibles selon la configuration
+**Adresse** : `https://documents.<BASE_DOMAIN>`
 
-## MinIO Console — Gestion des fichiers
+Extraction de contenu de documents (OCR, PDF, etc.).
 
-### Accès
+- `POST /v1/convert/source` — convertir un document
 
-Se connecter à `https://stockage.{BASE_DOMAIN}` avec les credentials S3 configurés.
+## API LiteLLM
 
-### Fonctionnalités
+**Adresse** : `https://api.<BASE_DOMAIN>/v1`
 
-- Créer et gérer les buckets
-- Upload et download de fichiers
-- Partage de liens
-- Gestion des permissions
+Passerelle OpenAI-compatible pour les modèles chat et embeddings.
 
-### API S3
+**Authentification** : en-tête `Authorization: Bearer <LITELLM_MASTER_KEY>` (clé définie dans `.env`).
 
-Compatible avec l'API S3 standard AWS. Utilisez n'importe quel client S3:
+**Modèles exposés** : `chat` (LLM local) et `embeddinggemma` (embeddings).
 
-```bash
-# Exemple avec aws cli
-aws s3 ls s3://langfuse
-aws s3 cp fichier.txt s3://mon-bucket/
-```
+Les corps de requête complets ne sont pas listés ici ; voir `docs/API-REFERENCE.md`.
 
-## Langfuse — Monitoring IA
+## Stockage S3 (RustFS)
 
-### Accès
+**Adresse** : `https://stockage.<BASE_DOMAIN>`
 
-Se connecter à `https://suivi-ia.{BASE_DOMAIN}`.
+Console web de stockage objet compatible S3 (RustFS).
 
-### Fonctionnalités
+**Connexion** : les credentials sont les valeurs de `S3_ROOT_USER` et `S3_ROOT_PASSWORD` dans `.env`.
 
-- **Tracing**: Suivre chaque appel LLM
-- **Évaluation**: Mesurer la qualité des réponses
-- **Sessions**: Analyser les conversations
-- **Dashboards**: Métriques d'usage et de performance
+## Langfuse
 
-### Concepts
+**Adresse** : `https://suivi-ia.<BASE_DOMAIN>`
 
-- **Trace**: Une unité de travail (ex: un appel API)
-- **Span**: Une opération dans une trace (ex: appel LLM, recherche)
-- **Observation**: Données capturées (tokens, durée, coût)
+Monitoring et traçage des applications IA.
 
-## SearXNG — Recherche privée
+**Connexion** : compte admin créé à l'initialisation. Les credentials sont les valeurs de `LANGFUSE_INIT_USER_EMAIL` et `LANGFUSE_INIT_USER_PASSWORD` dans `.env`. L'inscription de nouveaux utilisateurs est désactivée.
 
-### Accès
+## n8n
 
-Se connecter à `https://recherche.{BASE_DOMAIN}`.
+**Adresse** : `https://automatisation.<BASE_DOMAIN>`
 
-### Fonctionnalités
+Automation et orchestration de workflows.
 
-- Recherche web sans tracking
-- Résultats agrégés de multiples moteurs
-- Recherche d'images, vidéos, news
-- API JSON pour intégration
+Aucun compte n'est pré-créé par la stack. Le premier accès demande de créer un compte utilisateur (comportement standard de n8n).
 
-### API
+## SearXNG
 
-```bash
-curl "http://searxng:8080/search?q=exemple&format=json"
-```
+Service interne sans adresse publique, utilisé comme moteur de recherche web par Open WebUI.
 
-## N8N — Automation
+## Portainer
 
-### Accès
+**Adresse** : `https://admin.<BASE_DOMAIN>`
 
-Se connecter à `https://automatisation.{BASE_DOMAIN}`.
+Administration de l'infrastructure Docker.
 
-### Fonctionnalités
-
-- Création de workflows visuels
-- Intégration avec des centaines d'applications
-- Scheduling et triggers
-- Webhooks
-
-### Exemples de workflows
-
-- Envoyer un email quand un nouveau message arrive
-- Traiter automatiquement des documents PDF
-- Mettre à jour un CRM avec des données web
-
-## Grafana — Dashboards
-
-### Accès
-
-Se connecter à `https://monitoring.{BASE_DOMAIN}`.
-
-### Dashboards disponibles
-
-- **Système**: CPU, RAM, disque, réseau
-- **Docker**: Conteneurs, images, volumes
-- **Services**: Statuts et performances des services
-- **LLM**: Utilisation, tokens, latence
-
-## Portainer — Administration Docker
-
-### Accès
-
-Se connecter à `https://admin.{BASE_DOMAIN}`.
-
-### Fonctionnalités
-
-- Gestion des conteneurs
-- Gestion des images
-- Logs et monitoring
-- Configuration réseau
-- Volumes et stockage
+Aucun compte n'est pré-créé par la stack. Le premier accès demande de créer un compte utilisateur (comportement standard de Portainer).
