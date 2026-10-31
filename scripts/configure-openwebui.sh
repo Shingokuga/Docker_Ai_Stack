@@ -50,22 +50,23 @@ echo "Connexion à Open WebUI..."
 
 # Méthode: curl via le réseau Docker (le plus sûr)
 exec_cmd() {
-    docker compose exec -T open-webui curl -s -k -X "$1" \
-        -H "Authorization: Bearer $2" \
+    ./stack exec -T open-webui curl -s -k -X "$1" \
+        -H "Authorization: Bearer ***" \
         -H "Content-Type: application/json" \
-        ${3:+"-d $3"} \
+        ${3:+"-d" "$3"} \
         "$4"
 }
 
 exec_cmd_noauth() {
-    docker compose exec -T open-webui curl -s -k -X "$1" \
+    ./stack exec -T open-webui curl -s -k -X "$1" \
         -H "Content-Type: application/json" \
-        ${2:+"-d $2"} \
+        ${2:+"-d" "$2"} \
         "$3"
 }
 
 # Connexion
-login_resp=$(exec_cmd_noauth POST "{\"email\":\"$WEBUI_ADMIN_EMAIL\",\"password\":\"$WEBUI_ADMIN_PASSWORD\"}" "/api/v1/auths/signin")
+login_json=$(jq -n --arg e "$WEBUI_ADMIN_EMAIL" --arg p "$WEBUI_ADMIN_PASSWORD" '{email:$e,password:$p}')
+login_resp=$(exec_cmd_noauth POST "$login_json" "http://localhost:8080/api/v1/auths/signin")
 token=$(echo "$login_resp" | jq -r '.token' 2>/dev/null)
 if [[ -z "$token" ]]; then
     echo "ERREUR: Connexion échouée"
@@ -76,7 +77,7 @@ fi
 echo "Connecté. Configuration des serveurs MCP..."
 
 # Récupérer la liste existante des connexions MCP
-existing=$(exec_cmd GET "$token" "" "/api/v1/configs/tool_servers")
+existing=$(exec_cmd GET "$token" "" "http://localhost:8080/api/v1/configs/tool_servers")
 echo "$existing" > /tmp/openwebui_existing_connections.json
 
 # Fonction pour fusionner les connexions MCP par info.id
@@ -169,11 +170,11 @@ fi
 merged=$(merge_connections /tmp/openwebui_existing_connections.json "$obscura_conn" "$context7_conn")
 echo "$merged" > /tmp/openwebui_merged_connections.json
 
-resp=$(exec_cmd POST "$token" "$(echo "$merged" | jq -c '.')" "/api/v1/configs/tool_servers")
+resp=$(exec_cmd POST "$token" "$(echo "$merged" | jq -c '.')" "http://localhost:8080/api/v1/configs/tool_servers")
 echo "Configuration envoyée."
 
 # Vérifier
-final=$(exec_cmd GET "$token" "" "/api/v1/configs/tool_servers")
+final=$(exec_cmd GET "$token" "" "http://localhost:8080/api/v1/configs/tool_servers")
 echo "Connexions MCP configurées:"
 echo "$final" | jq -c '.[] | {id: .info.id, name: .info.name, enabled: .config.enable}'
 
