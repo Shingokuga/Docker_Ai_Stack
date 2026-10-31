@@ -120,39 +120,127 @@ detect_gpu_tier() {
 }
 
 # -------------------------------------------------------
+# Helpers: read/write .env safely (no sed, no string concat)
+# -------------------------------------------------------
+get_env() {
+    local key="$1"
+    local val=""
+    if [ -f .env ]; then
+        val=$(/usr/bin/grep -m1 "^${key}=" .env 2>/dev/null | /usr/bin/cut -d'=' -f2-)
+    fi
+    echo "$val"
+}
+
+set_env() {
+    local key="$1"
+    local value="$2"
+    # Pass value via environment variable to avoid shell injection
+    ENV_SET_KEY="$key" ENV_SET_VALUE="$value" python3 -c '
+import os
+key = os.environ["ENV_SET_KEY"]
+value = os.environ["ENV_SET_VALUE"]
+path = ".env"
+lines = []
+found = False
+if os.path.exists(path):
+    with open(path, "r") as f:
+        for line in f:
+            if line.startswith(key + "="):
+                lines.append(f"{key}={value}\n")
+                found = True
+            else:
+                lines.append(line)
+if not found:
+    lines.append(f"{key}={value}\n")
+with open(path, "w") as f:
+    f.writelines(lines)
+'
+}
+
+# -------------------------------------------------------
 # c) Questions interactives ou mode --yes
 # -------------------------------------------------------
+get_env() {
+    local key="$1"
+    if [ -f .env ]; then
+        /usr/bin/grep -m1 "^${key}=" .env 2>/dev/null | /usr/bin/cut -d'=' -f2-
+    fi
+}
+
+set_env() {
+    local key="$1"
+    local value="$2"
+    # Pass value via env var to avoid shell injection in sed/awk
+    ENV_SET_KEY="$key" ENV_SET_VALUE="$value" python3 -c '
+import os
+key = os.environ["ENV_SET_KEY"]
+value = os.environ["ENV_SET_VALUE"]
+path = ".env"
+lines = []
+found = False
+if os.path.exists(path):
+    with open(path, "r") as f:
+        for line in f:
+            if line.startswith(key + "="):
+                lines.append(f"{key}={value}\n")
+                found = True
+            else:
+                lines.append(line)
+if not found:
+    lines.append(f"{key}={value}\n")
+with open(path, "w") as f:
+    f.writelines(lines)
+'
+}
+
 ask_config() {
     info "Configuration de la stack..."
 
     # Domaine
+    local env_base_domain
+    env_base_domain=$(get_env BASE_DOMAIN)
     if [ $YES_MODE -eq 1 ]; then
-        BASE_DOMAIN="${BASE_DOMAIN:-local}"
+        BASE_DOMAIN="${BASE_DOMAIN:-${env_base_domain:-local}}"
     else
+        local domain_hint="${env_base_domain:-local}"
         info "Entrez le domaine de base (ex: exemple.com) ou 'local' pour http://localhost :"
-        read -r -e -p "Domaine (local) : " -i "local" BASE_DOMAIN
+        read -r -e -p "Domaine (${domain_hint}) : " -i "$domain_hint" BASE_DOMAIN
     fi
 
     # Email admin
+    local env_admin_email
+    env_admin_email=$(get_env WEBUI_ADMIN_EMAIL)
     if [ $YES_MODE -eq 1 ]; then
-        ADMIN_EMAIL="${ADMIN_EMAIL:-admin@${BASE_DOMAIN}}"
+        ADMIN_EMAIL="${ADMIN_EMAIL:-${env_admin_email:-admin@${BASE_DOMAIN}}}"
     else
+        local email_hint="${env_admin_email:-admin@${BASE_DOMAIN}}"
         info "Entrez l'email de l'administrateur pour Open WebUI et Langfuse :"
-        read -r -e -p "Email admin (admin@${BASE_DOMAIN}) : " -i "admin@${BASE_DOMAIN}" ADMIN_EMAIL
+        read -r -e -p "Email admin (${email_hint}) : " -i "$email_hint" ADMIN_EMAIL
     fi
 
     # ComfyUI
+    local env_compose_profiles
+    env_compose_profiles=$(get_env COMPOSE_PROFILES)
+    local comfyui_hint="non"
+    if [ "$env_compose_profiles" = "comfyui" ]; then
+        comfyui_hint="oui"
+    fi
     if [ $YES_MODE -eq 1 ]; then
-        COMFYUI_ENABLED="${ENABLE_COMFYUI:-0}"
-        if [ "$COMFYUI_ENABLED" = "1" ] || [ "$COMFYUI_ENABLED" = "true" ]; then
+        if [ "${ENABLE_COMFYUI:-}" = "1" ] || [ "${ENABLE_COMFYUI:-}" = "true" ]; then
             COMFYUI_ENABLED=1
-        else
+        elif [ "${ENABLE_COMFYUI:-}" = "0" ] || [ "${ENABLE_COMFYUI:-}" = "false" ]; then
             COMFYUI_ENABLED=0
+        else
+            if [ "$env_compose_profiles" = "comfyui" ]; then
+                COMFYUI_ENABLED=1
+            else
+                COMFYUI_ENABLED=0
+            fi
         fi
     else
         info "Installer ComfyUI ? (~41 Go de modèles supplémentaires)"
-        read -r -e -p "ComfyUI (non) : " COMFYUI_ENABLED
-        if [ "$COMFYUI_ENABLED" = "yes" ] || [ "$COMFYUI_ENABLED" = "1" ] || [ "$COMFYUI_ENABLED" = "true" ]; then
+        read -r -e -p "ComfyUI (${comfyui_hint}) : " COMFYUI_ENABLED
+        if [ "$COMFYUI_ENABLED" = "yes" ] || [ "$COMFYUI_ENABLED" = "1" ] || [ "$COMFYUI_ENABLED" = "true" ] || [ "$COMFYUI_ENABLED" = "oui" ]; then
             COMFYUI_ENABLED=1
         else
             COMFYUI_ENABLED=0
@@ -160,11 +248,23 @@ ask_config() {
     fi
 
     # GPU Tier
+    local env_gpu_tier
+    env_gpu_tier=$(get_env GPU_TIER)
     if [ $YES_MODE -eq 1 ]; then
-        GPU_TIER="${GPU_TIER:-$(detect_gpu_tier)}"
+        if [ -n "${GPU_TIER:-}" ]; then
+            : # Use env var
+        elif [ -n "$env_gpu_tier" ]; then
+            GPU_TIER="$env_gpu_tier"
+        else
+            GPU_TIER=$(detect_gpu_tier)
+        fi
     else
         local detected
-        detected=$(detect_gpu_tier)
+        if [ -n "$env_gpu_tier" ]; then
+            detected="$env_gpu_tier"
+        else
+            detected=$(detect_gpu_tier)
+        fi
         info "Palier GPU détecté : $detected"
         read -r -e -p "Palier GPU (M/S/L) — S=<8Go, M=8-24Go, L=≥24Go : " -i "$detected" GPU_TIER
         GPU_TIER=$(echo "$GPU_TIER" | tr '[:lower:]' '[:upper:]')
@@ -183,17 +283,16 @@ create_env() {
     fi
 
     # Écrire les réponses dans .env de manière sécurisée
-    sed -i "s|^BASE_DOMAIN=.*|BASE_DOMAIN=${BASE_DOMAIN}|" .env
-    sed -i "s|^WEBUI_ADMIN_EMAIL=.*|WEBUI_ADMIN_EMAIL=${ADMIN_EMAIL}|" .env
-    sed -i "s|^LANGFUSE_INIT_USER_EMAIL=.*|LANGFUSE_INIT_USER_EMAIL=${ADMIN_EMAIL}|" .env
-    sed -i "s|^GPU_TIER=.*|GPU_TIER=${GPU_TIER}|" .env
-
+    set_env BASE_DOMAIN "$BASE_DOMAIN"
+    set_env WEBUI_ADMIN_EMAIL "$ADMIN_EMAIL"
+    set_env LANGFUSE_INIT_USER_EMAIL "$ADMIN_EMAIL"
+    set_env GPU_TIER "$GPU_TIER"
     if [ "$COMFYUI_ENABLED" -eq 1 ]; then
-        COMPOSE_PROFILES="comfyui"
+        set_env COMPOSE_PROFILES "comfyui"
     else
-        COMPOSE_PROFILES=""
+        set_env COMPOSE_PROFILES ""
     fi
-    sed -i "s|^COMPOSE_PROFILES=.*|COMPOSE_PROFILES=${COMPOSE_PROFILES}|" .env
+    COMPOSE_PROFILES=$(get_env COMPOSE_PROFILES)
 
     # Sélection des modèles via download-models.sh --select-only
     info "Sélection des modèles selon GPU_TIER=$GPU_TIER..."
