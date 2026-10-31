@@ -79,12 +79,12 @@ curl http://litellm:4000/v1/models \
 
 ## Whisper — Transcription audio
 
-**Endpoint:** `http://whisper:9000`
+**Endpoint:** `http://whisper:8000` (interne) ou `https://chat-ai.{BASE_DOMAIN}` (externe via Caddy)
 
 ### Transcription
 
 ```bash
-curl -X POST http://whisper:9000/v1/audio/transcriptions \
+curl -X POST http://whisper:8000/v1/audio/transcriptions \
   -H "Authorization: Bearer sk-xxxxxxx" \
   -F "file=@audio.mp3" \
   -F "model=large-v3"
@@ -93,7 +93,7 @@ curl -X POST http://whisper:9000/v1/audio/transcriptions \
 ### Traduction
 
 ```bash
-curl -X POST http://whisper:9000/v1/audio/translations \
+curl -X POST http://whisper:8000/v1/audio/translations \
   -H "Authorization: Bearer sk-xxxxxxx" \
   -F "file=@audio.mp3" \
   -F "model=large-v3"
@@ -104,21 +104,28 @@ curl -X POST http://whisper:9000/v1/audio/translations \
 - `tiny`, `base`, `small`, `medium`, `large`, `large-v3`
 - `Systran/faster-whisper-large-v3` (par défaut de la stack)
 
+### Autres endpoints vérifiés
+
+- `POST /v1/audio/speech` (TTS)
+- `GET /v1/models` (liste des modèles)
+- `GET /v1/audio/models`
+- `GET /v1/audio/voices`
+- `GET /health`
+
 ---
 
 ## Kokoro — Synthèse vocale
 
-**Endpoint:** `http://kokoro:8000`
+**Endpoint:** `http://kokoro:8880` (interne) ou `https://chat-ai.{BASE_DOMAIN}` (externe via Caddy)
 
 ### TTS
 
 ```bash
-curl -X POST http://kokoro:8000/api/tts \
+curl -X POST http://kokoro:8880/v1/audio/speech \
   -H "Content-Type: application/json" \
   -d '{
     "text": "Bonjour, je suis une voix synthétisée.",
-    "voice": "ff_siwis",
-    "format": "wav"
+    "voice": "ff_siwis"
   }' \
   --output sortie.wav
 ```
@@ -126,27 +133,31 @@ curl -X POST http://kokoro:8000/api/tts \
 ### Liste des voix
 
 ```bash
-curl http://kokoro:8000/api/voices
+curl http://kokoro:8880/v1/audio/voices
 ```
+
+### Autres endpoints vérifiés
+
+- `POST /v1/audio/voices/combine`
+- `GET /health`
 
 ---
 
 ## Docling — OCR et documents
 
-**Endpoint:** `http://docling-serve:8000`
+**Endpoint:** `http://docling-serve:5001` (interne) ou `https://documents.{BASE_DOMAIN}` (externe via Caddy)
 
 ### Conversion de document
 
 ```bash
-curl -X POST http://docling-serve:8000/convert \
-  -F "file=@document.pdf" \
-  -F "format=markdown"
+curl -X POST http://docling-serve:5001/v1/convert/source \
+  -F "file=@document.pdf"
 ```
 
 ### Extraction de texte
 
 ```bash
-curl -X POST http://docling-serve:8000/extract_text \
+curl -X POST http://docling-serve:5001/extract_text \
   -F "file=@document.pdf"
 ```
 
@@ -154,6 +165,11 @@ curl -X POST http://docling-serve:8000/extract_text \
 
 - Entrée: PDF, DOCX, PPTX, XLSX, images (JPG, PNG)
 - Sortie: Markdown, HTML, JSON, texte brut
+
+### Autres endpoints vérifiés
+
+- `GET /health`
+- Autres chemins : à vérifier
 
 ---
 
@@ -277,33 +293,37 @@ curl -X POST http://qdrant:6333/collections/my_collection/points/search \
 
 ## SearXNG — Recherche
 
-**Endpoint:** `http://searxng:8080`
+**Endpoint:** `http://searxng:8080` (interne) ou `https://chat-ai.{BASE_DOMAIN}` (externe via Caddy)
 
-### Recherche web
+### Recherche web — à vérifier
 
 ```bash
 curl "http://searxng:8080/search?q=exemple&format=json"
 ```
 
-### Recherche d'images
+### Recherche d'images — à vérifier
 
 ```bash
 curl "http://searxng:8080/search?q=exemple&categories=images&format=json"
 ```
 
-### Recherche de vidéos
+### Recherche de vidéos — à vérifier
 
 ```bash
 curl "http://searxng:8080/search?q=exemple&categories=videos&format=json"
 ```
 
+### Autres endpoints vérifiés
+
+- `GET /healthz` (vérifié)
+
 ---
 
 ## Langfuse — API
 
-**Endpoint:** `http://langfuse-web:3000`
+**Endpoint:** `http://langfuse-web:3000` (interne) ou `https://suivi-ia.{BASE_DOMAIN}` (externe via Caddy)
 
-### Créer une trace
+### Créer une trace — à vérifier
 
 ```bash
 curl -X POST http://langfuse-web:3000/api/public/traces \
@@ -316,7 +336,7 @@ curl -X POST http://langfuse-web:3000/api/public/traces \
   }'
 ```
 
-### Créer un span
+### Créer un span — à vérifier
 
 ```bash
 curl -X POST http://langfuse-web:3000/api/public/spans \
@@ -330,3 +350,7 @@ curl -X POST http://langfuse-web:3000/api/public/spans \
     "startTime": "2026-01-01T00:00:00Z"
   }'
 ```
+
+### Autres endpoints vérifiés
+
+- `GET /api/public/health` (vérifié)
