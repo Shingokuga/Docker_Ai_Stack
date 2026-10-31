@@ -11,7 +11,7 @@
 #   2. Exportez le jeton :
 #        export GITHUB_TOKEN=github_pat_xxxxxxxx
 #   3. Téléchargez ce script :
-#        curl -fsSL -H "Authorization: Bearer ***" \
+#        curl -fsSL -H "Authorization: Bearer $GITHUB_TOKEN" \
 #             https://raw.githubusercontent.com/Shingokuga/Docker_Ai_Stack/main/bootstrap.sh \
 #             -o bootstrap.sh
 #   4. Exécutez-le :
