@@ -2,148 +2,165 @@
 
 ## Prérequis système
 
-### Configuration minimale
+| Ressource | Minimum | Recommandé | Notes |
+|-----------|---------|------------|-------|
+| OS | Ubuntu 22.04 LTS / 24.04 LTS | Ubuntu 24.04 LTS | Utilisateur avec sudo |
+| GPU NVIDIA | — | GPU NVIDIA | Optionnel |
+| Pilote NVIDIA | — | ≥ 570 | Images cu128 ; avertissement si < 570 |
+| Disque SSD | ~25 Go | 500 Go+ | Voir détails ci-dessous |
+| Mémoire vive | Non mesurée | Non mesurée | Non testée |
 
-| Ressource | Minimum | Recommandé |
-|-----------|---------|------------|
-| OS | Ubuntu 22.04 LTS / 24.04 LTS | Ubuntu 24.04 LTS |
-| RAM | 16 Go | 32 Go+ |
-| Stockage | 100 Go SSD | 500 Go+ NVMe |
-| GPU NVIDIA | 8 Go VRAM | 24 Go+ VRAM |
-| Pilote NVIDIA | ≥ 570 | ≥ 580 |
+### Disque (mesuré le 31/10, taille des fichiers)
 
-### Logiciels requis
+| Palier | GGUF + mmproj | ComfyUI (optionnel) | Total estimé |
+|--------|---------------|---------------------|--------------|
+| L | 19,4 Go | +41,3 Go | ~20 Go ou ~61 Go |
+| M / S | 7,9 Go | +41,3 Go | ~8 Go ou ~49 Go |
 
-- Docker Engine (dernière version)
-- Docker Compose v2 (plugin)
-- git + git-lfs
-- curl, jq
+Au premier démarrage, ollama-init télécharge embeddinggemma-2 (1,3 Go) et kev:9b-q4_K_M (5,6 Go), et le service whisper télécharge large-v3 (3,1 Go). Les poids des images Docker n'ont pas été mesurés.
 
-## Installation étape par étape
+### Paliers GPU
 
-### Étape 1: Bootstrap (machine vierge)
+Le palier détermine le modèle GGUF chargé. Détection automatique basée sur la mémoire GPU (`nvidia-smi`) :
 
-```bash
-# Télécharger bootstrap.sh sur la machine cible
-curl -LO https://github.com/votre-repo/stack-universelle/raw/main/bootstrap.sh
-chmod +x bootstrap.sh
+| Palier | Condition | Modèle |
+|--------|-----------|--------|
+| L | ≥ 24 Go VRAM | Qwen3.8-27B |
+| M | ≥ 8 Go VRAM | Qwen3.5-9B |
+| S | < 8 Go VRAM ou sans GPU | Qwen3.5-9B |
 
-# Exécuter le bootstrap
-STACK_REPO_URL=https://github.com/votre-repo/stack-universelle.git ./bootstrap.sh
-```
+Si `nvidia-smi` indique [N/A] pour la VRAM (mémoire unifiée), la mémoire système est utilisée. Sans `nvidia-smi`, palier S.
 
-Le bootstrap installe:
-- Paquets système (git, curl, jq, ca-certificates)
-- Docker + Docker Compose
-- NVIDIA Container Toolkit (si GPU détecté)
-- git-lfs
-- Clone le dépôt de la stack
+---
 
-### Étape 2: Installation
+## Étape 1 : Bootstrap
 
-```bash
-cd stack-universelle
+`bootstrap.sh` prépare une machine vierge :
 
-# Installer et lancer la stack
-./install.sh
-```
+- `apt update` + `apt upgrade` complet ; si un redémarrage est requis, il s'arrête et indique la commande à relancer
+- Installation de git, git-lfs, curl, ca-certificates, jq
+- Installation de Docker depuis le dépôt docker.com
+- Si `nvidia-smi` existe : avertissement si pilote < 570, installation de nvidia-container-toolkit, configuration du runtime Docker (redémarrage de Docker uniquement si le runtime n'était pas configuré)
+- Ajout de l'utilisateur au groupe docker
+- Clone ou mise à jour du dépôt
+- Lancement de `install.sh` avec les arguments transmis
 
-L'installateur:
-1. Vérifie les prérequis (Docker, RAM, disque)
-2. Crée les répertoires de données avec les permissions correctes
-3. Copie `.env.example` → `.env` et génère les secrets
-4. Pull toutes les images Docker
-5. Démarre la stack en mode détaché
+### Variables d'environnement de bootstrap.sh
 
-### Étape 3: Configuration .env
-
-Éditez `.env` avec vos paramètres:
+| Variable | Défaut | Usage |
+|----------|--------|-------|
+| `STACK_REPO_URL` | `https://github.com/Shingokuga/Docker_Ai_Stack.git` | URL du dépôt |
+| `STACK_BRANCH` | `main` | Branche à cloner |
+| `STACK_DIR` | `$HOME/Docker_Ai_Stack` | Répertoire de destination |
+| `GITHUB_TOKEN` | — | Dépôt privé (voir ci-dessous) |
+| `BOOTSTRAP_YES` | — | Si `=1`, mode non interactif |
 
 ```bash
-nano .env
+# Machine vierge, dépôt public
+bash bootstrap.sh
+
+# Mode non interactif, sans GPU
+bash bootstrap.sh --yes --no-gpu
+
+# Dépôt privé
+export GITHUB_TOKEN="ghp_xxx"
+STACK_REPO_URL=https://github.com/org/private-stack.git bash bootstrap.sh
 ```
 
-#### Sections critiques
+### Dépôt privé avec GITHUB_TOKEN
 
-**Domaine:**
-```env
-BASE_DOMAIN=local          # Remplacer par votre domaine (ex: ai.entreprise.fr)
-COMPOSE_PROJECT_NAME=ustack # Préfixe des conteneurs
-```
+Le jeton est envoyé en en-tête HTTP Authorization, jamais dans l'URL. Le dépôt ne contient aucun fichier LFS. Le jeton doit avoir un accès en lecture seule sur le dépôt (fine-grained recommandé). La procédure détaillée se trouve dans l'en-tête de `bootstrap.sh`.
 
-**GPU:**
-```env
-GPU_TIER=M                 # S (petit), M (moyen), L (grand)
-```
+---
 
-**Modèles:**
-```env
-LLM_GGUF=your-model.Q4_K_M.gguf  # Fichier GGUF dans data/models/
-LLM_CTX=32768                  # Taille de contexte
-```
+## Étape 2 : install.sh
 
-**Sécurité — Mots de passe et clés:**
-```env
-POSTGRES_PASSWORD=change_me        # Base de données
-REDIS_PASSWORD=change_me           # Cache
-LITELLM_MASTER_KEY=sk-xxxxxxx      # Clé API LiteLLM
-WEBUI_SECRET_KEY=change_me         # Open WebUI
-```
+`install.sh` configure et lance la stack.
 
-**Compte admin Open WebUI:**
-```env
-WEBUI_ADMIN_EMAIL=admin@entreprise.fr
-WEBUI_ADMIN_PASSWORD=min_24_chars_long_password
-```
+### Options
 
-#### Générer les secrets
+| Option | Effet |
+|--------|-------|
+| `--yes` | Mode non interactif (utilise les variables d'environnement) |
+| `--no-gpu` | Palier S, aucun modèle GGUF téléchargé, seuls les 17 services sans GPU démarrent |
+| `--config-only` | Crée/mise à jour `.env`, génère les secrets, valide la configuration compose, mais ne télécharge ni ne démarre |
+
+### Ordre d'exécution
+
+1. Vérification des prérequis (docker, compose v2, groupe docker)
+2. Questions interactives (domaine, e-mail admin, ComfyUI, palier GPU)
+3. Création ou mise à jour de `.env` (copie de `.env.example` si absent)
+4. Choix des modèles selon le palier
+5. Génération des secrets
+6. Récapitulatif et confirmation
+7. Validation de la configuration compose (`--config-only` s'arrête ici)
+8. Téléchargement des modèles
+9. Création des répertoires `data/`
+10. Pull et démarrage des services
+11. Attente de Open WebUI (300 s par défaut, configurable via `WEBUI_WAIT_SECONDS`)
+12. Configuration de Open WebUI (outils MCP)
+13. Récapitulatif des adresses
+
+### Mode --yes (variables d'environnement)
+
+En mode `--yes`, les valeurs sont lues dans cet ordre de priorité :
+
+| Paramètre | Variable d'env | .env | Défaut si absent |
+|-----------|----------------|------|-----------------|
+| Domaine | `BASE_DOMAIN` | `BASE_DOMAIN` | `local` |
+| E-mail admin | `ADMIN_EMAIL` | `WEBUI_ADMIN_EMAIL` | `admin@<domaine>` |
+| ComfyUI | `ENABLE_COMFYUI` (1/0) | `COMPOSE_PROFILES=comfyui` | non activé |
+| Palier GPU | `GPU_TIER` | `GPU_TIER` | détection automatique |
 
 ```bash
-bash scripts/gen-secrets.sh
+# Déploiement non interactif complet
+BASE_DOMAIN=ai.entreprise.fr ADMIN_EMAIL=admin@entreprise.fr GPU_TIER=L \
+ENABLE_COMFYUI=1 bash install.sh --yes
+
+# Configuration seule, sans téléchargement ni démarrage
+bash install.sh --config-only
+
+# Sans GPU (17 services, pas de modèle GGUF)
+bash install.sh --yes --no-gpu
 ```
 
-### Étape 4: Télécharger les modèles
+### Services sans GPU (--no-gpu)
+
+Les 6 services GPU suivants ne démarrent pas avec `--no-gpu` : comfyui, docling-serve, kokoro, llama-server, ollama, whisper. Les 17 autres services fonctionnent sans GPU.
+
+---
+
+## Profil comfyui
+
+Le seul profil compose est `comfyui`. Il n'est pas inclus dans un `up -d` standard.
+
+### Activation
 
 ```bash
-./download-models.sh
-```
-
-Télécharge les modèles:
-- LLM GGUF (configuré via LLM_GGUF)
-- Vision mmproj
-- Qwen-Image pour ComfyUI
-- Modèles Ollama (embeddings, décision)
-
-## Profils de déploiement
-
-### Profils disponibles
-
-| Profil | Services inclus | Usage |
-|--------|-----------------|-------|
-| `core` | postgres, redis, qdrant, llama, ollama, litellm | Noyau minimal |
-| `apps` | open-webui, n8n, searxng, portainer | Applications web |
-| `media` | comfyui, whisper, kokoro, docling-serve | Multimédia |
-| `vision` | obscura, obscura-mcp | Navigation web |
-| `monitoring` | grafana, langfuse, clickhouse | Observabilité |
-| `comfyui` | comfyui seul | Génération d'images |
-
-### Lancement par profil
-
-```bash
-# Noyau uniquement
-./stack --profile core up -d
-
-# Applications uniquement
-./stack --profile apps up -d
-
-# Stack complète
+# Via .env (recommandé)
+echo 'COMPOSE_PROFILES=comfyui' >> .env
 ./stack up -d
 
-# Combinations
-./stack --profile core --profile apps up -d
+# Via ligne de commande
+./stack --profile comfyui up -d
 ```
 
+### Comportement mesuré
+
+- `up -d` sans profil : ne démarre pas les services à profil
+- `--profile comfyui` : ajoute les services comfyui aux autres services
+- `down` : arrête et supprime tous les services du projet (tous profils)
+- `stop <service>` : n'arrête que le service spécifié
+
+### Services GPU du profil comfyui
+
+Le service `comfyui` (5 fichiers, ~41,3 Go) est le seul service supplémentaire du profil. Les 5 autres services GPU (docling-serve, kokoro, llama-server, ollama, whisper) font partie de la stack principale et ne nécessitent pas de profil.
+
+---
+
 ## Gestion de la stack
+
+`./stack` est un wrapper autour de `docker compose` utilisant les fichiers `versions.env` et `.env`.
 
 ### Commandes principales
 
@@ -151,71 +168,125 @@ Télécharge les modèles:
 # Démarrer
 ./stack up -d
 
-# Arrêter
-./stack down
+# Démarrer un service spécifique
+./stack up -d open-webui
 
-# Redémarrer
-./stack restart
+# Redémarrer un service (relit .env)
+./stack up -d <service>
+
+# Arrêter un service
+./stack stop <service>
+
+# Arrêter tout le projet
+./stack down
 
 # Logs
 ./stack logs -f
-
-# Logs d'un service
 ./stack logs -f open-webui
 
-# Statut
+# Statut des conteneurs
 ./stack ps
 
-# Pull images
+# Pull des nouvelles images
 ./stack pull
 ```
+
+### Note sur restart vs up
+
+`./stack restart` ne relit pas `.env` (mesuré). Pour appliquer une modification de `.env`, utiliser `./stack up -d <service>`.
+
+---
+
+## Mise à jour
+
+Le dépôt ne contient aucun fichier LFS.
 
 ### Mise à jour de la stack
 
 ```bash
-# Mettre à jour le dépôt
+# 1. Mettre à jour le dépôt
 git pull
-git lfs pull
 
-# Mettre à jour les images
+# 2. Modifier les versions si nécessaire
+nano versions.env
+
+# 3. Pull des nouvelles images
 ./stack pull
 
-# Redémarrer avec les nouvelles images
+# 4. Redéployer
 ./stack up -d
 ```
 
-### Mise à jour des versions
+### Mise à jour d'un seul service
 
-Toutes les versions sont dans `versions.env`. Pour mettre à jour:
+```bash
+./stack pull <service>
+./stack up -d <service>
+```
 
-1. Modifier les tags dans `versions.env`
-2. Exécuter `./stack pull`
-3. Exécuter `./stack up -d`
+### Modification de .env
+
+```bash
+nano .env
+./stack up -d  # Applique à tous les services
+```
+
+---
 
 ## Tests
 
+### test-stack.sh
+
+Pour chaque hôte défini dans `caddy/hostnames.txt`, `test-stack.sh` effectue une requête HTTPS de 5 secondes (certificat interne accepté ; l'hôte `certificat` est testé en HTTP sur `/root.crt`). Le script retourne le code 1 s'au moins un hôte échoue.
+
 ```bash
-# Vérifier l'intégrité de la stack
 ./test-stack.sh
 ```
 
-Vérifie:
-- Tous les conteneurs sont démarrés
-- Les services répondent
-- Les connexions réseau fonctionnent
+### Vérification des conteneurs
 
-## URLs de la stack
+`test-stack.sh` ne teste pas l'état des conteneurs. Pour cela :
 
-Une fois déployée, la stack est accessible via:
+```bash
+./stack ps
+```
+
+### Hôtes testés
+
+chat-ai, automatisation, suivi-ia, admin, documents, api, stockage, certificat, images (si profil comfyui).
+
+---
+
+## Adresses
 
 | Service | URL |
 |---------|-----|
-| Chat IA | `https://chat-ai.{BASE_DOMAIN}` |
-| Automation | `https://automatisation.{BASE_DOMAIN}` |
-| Monitoring IA | `https://suivi-ia.{BASE_DOMAIN}` |
-| Admin | `https://admin.{BASE_DOMAIN}` |
-| API | `https://api.{BASE_DOMAIN}` |
-| Documents | `https://documents.{BASE_DOMAIN}` |
-| Stockage | `https://stockage.{BASE_DOMAIN}` |
-| Recherche | `https://recherche.{BASE_DOMAIN}` |
-| Monitoring | `https://monitoring.{BASE_DOMAIN}` |
+| Chat IA | `https://chat-ai.<BASE_DOMAIN>` |
+| Automatisation | `https://automatisation.<BASE_DOMAIN>` |
+| Suivi IA | `https://suivi-ia.<BASE_DOMAIN>` |
+| Admin | `https://admin.<BASE_DOMAIN>` |
+| Documents | `https://documents.<BASE_DOMAIN>` |
+| API | `https://api.<BASE_DOMAIN>` |
+| Stockage | `https://stockage.<BASE_DOMAIN>` |
+| Certificat | `https://certificat.<BASE_DOMAIN>` |
+| Images (ComfyUI) | `https://images.<BASE_DOMAIN>` |
+
+---
+
+## Scripts annexes
+
+### Téléchargement des modèles seul
+
+`./download-models.sh` peut être utilisé seul pour télécharger les modèles sans redéployer la stack.
+
+### Génération des secrets
+
+Les secrets sont générés automatiquement par `install.sh`. Le script `scripts/gen-secrets.sh` peut être utilisé pour les régénérer.
+
+### Vérification de la cohérence
+
+Le script `scripts/stack-consistency-check.py` vérifie la cohérence entre les versions dans `versions.env`, les tags dans les fichiers compose, et les documents.
+
+```bash
+python3 scripts/stack-consistency-check.py
+```
