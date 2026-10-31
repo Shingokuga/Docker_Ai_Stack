@@ -28,10 +28,13 @@ outgoing:
   enable_http2: true
 
 plugins:
-  - "Hash plugin"
-  - "Hostnames plugin"
-  - "Online Etymology Dictionary"
-  - "Safe search plugin"
-  - "Self Info"
-  - "Tracker URL remover"
-  - "Unit converter"
+  searx.plugins.hash_plugin.SXNGPlugin:
+    active: true
+  searx.plugins.hostnames.SXNGPlugin:
+    active: true
+  searx.plugins.self_info.SXNGPlugin:
+    active: true
+  searx.plugins.tracker_url_remover.SXNGPlugin:
+    active: true
+  searx.plugins.unit_converter.SXNGPlugin:
+    active: true
