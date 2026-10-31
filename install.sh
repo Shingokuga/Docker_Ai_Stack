@@ -6,6 +6,7 @@
 # Options :
 #   --yes          Mode sans interaction (utilise les variables d'environnement BASE_DOMAIN, ADMIN_EMAIL, ENABLE_COMFYUI, GPU_TIER)
 #   --config-only  S'arrête après la validation de la configuration (ne télécharge, ne crée et ne lance rien d'autre)
+#   --no-gpu       Force GPU_TIER=S et ne démarre que les services sans dépendance GPU
 info() { echo "ℹ  $*"; }
 ok() { echo "✅ $*"; }
 warn() { echo "⚠️  $*"; }
@@ -13,6 +14,7 @@ err() { echo "❌ $*" >&2; }
 
 YES_MODE=0
 CONFIG_ONLY=0
+NO_GPU=0
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE:-$0}")" && pwd)"
 
 parse_args() {
@@ -20,6 +22,7 @@ parse_args() {
         case "$arg" in
             --yes) YES_MODE=1 ;;
             --config-only) CONFIG_ONLY=1 ;;
+            --no-gpu) NO_GPU=1 ;;
         esac
     done
 }
@@ -158,6 +161,61 @@ with open(path, "w") as f:
 }
 
 # -------------------------------------------------------
+# b2) Compute services without GPU (for --no-gpu mode)
+# -------------------------------------------------------
+non_gpu_services() {
+    # Returns sorted list of services that neither require GPU nor depend (transitively) on GPU services
+    ./stack --profile comfyui config --format json 2>/dev/null | python3 -c '
+import json, sys
+
+raw = sys.stdin.read()
+try:
+    config = json.loads(raw)
+except json.JSONDecodeError as e:
+    sys.stderr.write(f"parse error: {e}\n")
+    sys.exit(1)
+
+services = config.get("services", {})
+
+def has_gpu(svc):
+    try:
+        devices = svc["deploy"]["resources"]["reservations"]["devices"]
+    except (KeyError, TypeError):
+        return False
+    return len(devices) > 0
+
+# Identify direct GPU services
+gpu_services = set()
+for name, svc in services.items():
+    if has_gpu(svc):
+        gpu_services.add(name)
+
+# Transitively mark services that depend on GPU services
+marked = set(gpu_services)
+changed = True
+while changed:
+    changed = False
+    for name, svc in services.items():
+        if name in marked:
+            continue
+        deps = svc.get("depends_on", {})
+        if isinstance(deps, list):
+            dep_names = deps
+        else:
+            dep_names = list(deps.keys())
+        for dep in dep_names:
+            if dep in marked:
+                marked.add(name)
+                changed = True
+                break
+
+result = sorted(s for s in services if s not in marked)
+for s in result:
+    print(s)
+'
+}
+
+# -------------------------------------------------------
 # c) Questions interactives ou mode --yes
 # -------------------------------------------------------
 get_env() {
@@ -248,26 +306,31 @@ ask_config() {
     fi
 
     # GPU Tier
-    local env_gpu_tier
-    env_gpu_tier=$(get_env GPU_TIER)
-    if [ $YES_MODE -eq 1 ]; then
-        if [ -n "${GPU_TIER:-}" ]; then
-            : # Use env var
-        elif [ -n "$env_gpu_tier" ]; then
-            GPU_TIER="$env_gpu_tier"
-        else
-            GPU_TIER=$(detect_gpu_tier)
-        fi
+    if [ $NO_GPU -eq 1 ]; then
+        GPU_TIER="S"
+        info "Mode --no-gpu : GPU_Tier forcé à S"
     else
-        local detected
-        if [ -n "$env_gpu_tier" ]; then
-            detected="$env_gpu_tier"
+        local env_gpu_tier
+        env_gpu_tier=$(get_env GPU_TIER)
+        if [ $YES_MODE -eq 1 ]; then
+            if [ -n "${GPU_TIER:-}" ]; then
+                : # Use env var
+            elif [ -n "$env_gpu_tier" ]; then
+                GPU_TIER="$env_gpu_tier"
+            else
+                GPU_TIER=$(detect_gpu_tier)
+            fi
         else
-            detected=$(detect_gpu_tier)
+            local detected
+            if [ -n "$env_gpu_tier" ]; then
+                detected="$env_gpu_tier"
+            else
+                detected=$(detect_gpu_tier)
+            fi
+            info "Palier GPU détecté : $detected"
+            read -r -e -p "Palier GPU (M/S/L) — S=<8Go, M=8-24Go, L=≥24Go : " -i "$detected" GPU_TIER
+            GPU_TIER=$(echo "$GPU_TIER" | tr '[:lower:]' '[:upper:]')
         fi
-        info "Palier GPU détecté : $detected"
-        read -r -e -p "Palier GPU (M/S/L) — S=<8Go, M=8-24Go, L=≥24Go : " -i "$detected" GPU_TIER
-        GPU_TIER=$(echo "$GPU_TIER" | tr '[:lower:]' '[:upper:]')
     fi
 }
 
@@ -339,6 +402,12 @@ create_env() {
                 ;;
         esac
     fi
+
+    if [ $NO_GPU -eq 1 ]; then
+        echo ""
+        echo "Mode sans GPU : llama-server, whisper, kokoro, docling-serve, ollama, comfyui non démarrés"
+        echo ""
+    fi
 }
 
 # -------------------------------------------------------
@@ -372,6 +441,10 @@ validate_config() {
 # f) Téléchargement des modèles
 # -------------------------------------------------------
 download_models() {
+    if [ $NO_GPU -eq 1 ]; then
+        info "Mode --no-gpu : aucun téléchargement de modèle GPU"
+        return 0
+    fi
     if [ -f download-models.sh ]; then
         info "Téléchargement des modèles..."
         if ! bash download-models.sh; then
@@ -446,6 +519,21 @@ create_data_dirs() {
 # h) Pull et démarrage de la stack
 # -------------------------------------------------------
 start_stack() {
+    if [ $NO_GPU -eq 1 ]; then
+        info "Mode --no-gpu : démarrage des services sans GPU uniquement..."
+        local services
+        services=$(non_gpu_services)
+        local service_list
+        service_list=$(echo "$services" | tr '\n' ' ' | xargs)
+
+        info "Pull des images pour les services sans GPU..."
+        ./stack pull $service_list
+        info "Démarrage des services sans GPU..."
+        ./stack up -d $service_list
+        ok "Services sans GPU démarrés !"
+        return 0
+    fi
+
     info "Pull des images (peut prendre quelques minutes)..."
     if ! docker compose --env-file versions.env --env-file .env pull; then
         err "Échec du pull d'au moins une image. Vérifiez les tags dans versions.env."
