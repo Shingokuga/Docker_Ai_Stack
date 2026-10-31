@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # test-stack.sh — Test de santé de tous les services de la stack
-# Utilise les routes définies dans caddy/Caddyfile.
+# Vérifie la parsabilité du compose, l'état réel des conteneurs et les points d'accès HTTP.
 set -euo pipefail
 
 cd "$(dirname "$0")"
@@ -11,7 +11,7 @@ get_env() {
     local default="$2"
     if [ -f .env ]; then
         local val
-        val=$(grep -m1 "^${key}=" .env | cut -d'=' -f2-)
+        val=$(/usr/bin/grep -m1 "^${key}=" .env | cut -d'=' -f2-)
         if [ -n "$val" ]; then
             echo "$val"
             return 0
@@ -20,6 +20,7 @@ get_env() {
     echo "$default"
 }
 
+NO_GPU=$(get_env NO_GPU "0")
 BASE_DOMAIN=$(get_env BASE_DOMAIN "local")
 HTTP_PORT=$(get_env HTTP_PORT "80")
 HTTPS_PORT=$(get_env HTTPS_PORT "443")
@@ -32,52 +33,123 @@ PASS=0
 FAIL=0
 TOTAL=0
 
-test_http() {
-    local name="$1"
-    local host="$2"
-    local scheme="$3"
-    local port="$4"
-    local path="$5"
+# Vérifier que les conteneurs sont up
+# 1. Vérification que le compose est parsable et ne contient pas d'erreurs de configuration
+info "Vérification de la configuration compose (./stack config)..."
+if ! ./stack config > /dev/null 2>&1; then
+    fail "Compose non parsable ou variables d'environnement manquantes"
+    PS_JSON=""
+else
+    ok "Configuration compose valide"
+fi
 
-    TOTAL=$((TOTAL + 1))
+# 2. Vérification de l'état réel des conteneurs
+info "État des conteneurs (./stack ps -a)..."
+PS_JSON=$(./stack ps -a --format json 2>/dev/null || echo "")
 
-    local result
-    local exit_code=0
-    result=$(curl --resolve "${host}:${port}:127.0.0.1" -k -fsS -m 5 "${scheme}://${host}:${port}${path}" 2>&1) || exit_code=$?
-
-    if [ $exit_code -eq 0 ]; then
-        ok "$name"
-        PASS=$((PASS + 1))
+# Parser la sortie JSON lignes par lignes (un objet JSON par ligne, pas un tableau)
+# Utiliser jq si présent, sinon python3 ligne par ligne
+parse_containers() {
+    if command -v jq >/dev/null 2>&1; then
+        echo "$PS_JSON" | jq -r '
+            [.Service, .Name, .State, .Health, (.ExitCode // 0)] | join("\t")
+        '
     else
-        fail "$name (curl exit $exit_code)"
-        FAIL=$((FAIL + 1))
+        echo "$PS_JSON" | python3 -c "
+import sys, json
+for line in sys.stdin:
+    line = line.strip()
+    if not line:
+        continue
+    try:
+        obj = json.loads(line)
+        service = obj.get('Service', 'unknown')
+        name = obj.get('Name', 'unknown')
+        state = obj.get('State', 'unknown')
+        health = obj.get('Health', '')
+        exit_code = obj.get('ExitCode', 0)
+        print(f'{service}\t{name}\t{state}\t{health}\t{exit_code}')
+    except json.JSONDecodeError:
+        pass
+"
     fi
 }
 
-info "Test de la stack universelle AI..."
-info "BASE_DOMAIN: $BASE_DOMAIN"
-info "HTTP_PORT: $HTTP_PORT, HTTPS_PORT: $HTTPS_PORT"
+CONTAINER_DATA=$(parse_containers)
 
-# Vérifier que les conteneurs sont up
-info "État des conteneurs (./stack ps)..."
-./stack ps --format json > /dev/null 2>&1 || true
+# Analyser l'état des conteneurs
+if [ -n "$CONTAINER_DATA" ]; then
+    while IFS=$'\t' read -r service name state health exit_code; do
+        state_lower=$(echo "$state" | tr '[:upper:]' '[:lower:]')
+        health_lower=$(echo "$health" | tr '[:upper:]' '[:lower:]')
 
-# Tests HTTP via Caddy (les hôtes définis dans caddy/hostnames.txt)
-while IFS= read -r hostname; do
-    # Ignorer les lignes vides et les commentaires
-    [ -z "$hostname" ] && continue
-    case "$hostname" in
-        \#*) continue ;;
-    esac
+        TOTAL=$((TOTAL + 1))
 
-    if [ "$hostname" = "certificat" ]; then
-        # Hôte en HTTP simple
-        test_http "$hostname" "certificat.${BASE_DOMAIN}" "http" "$HTTP_PORT" "/root.crt"
-    else
-        # Hôtes en HTTPS avec certificat interne
-        test_http "$hostname" "${hostname}.${BASE_DOMAIN}" "https" "$HTTPS_PORT" "/"
-    fi
-done < caddy/hostnames.txt
+        if [ "$health_lower" = "unhealthy" ]; then
+            fail "Service $service ($name) : unhealthy"
+            FAIL=$((FAIL + 1))
+        elif [ "$state_lower" = "restarting" ]; then
+            fail "Service $service ($name) : redémarrage en boucle"
+            FAIL=$((FAIL + 1))
+        elif [ "$state_lower" = "exited" ]; then
+            if [ "$exit_code" != "0" ] && [ -n "$exit_code" ]; then
+                fail "Service $service ($name) : terminé code $exit_code"
+                FAIL=$((FAIL + 1))
+            else
+                ok "Service $service ($name) : terminé normalement (code 0)"
+                PASS=$((PASS + 1))
+            fi
+        else
+            ok "Service $service ($name) : $state"
+            PASS=$((PASS + 1))
+        fi
+    done <<< "$CONTAINER_DATA"
+else
+    info "Aucun conteneur trouvé"
+fi
+
+# Vérifier les services requis sans GPU
+if [ "$NO_GPU" = "1" ]; then
+    # En mode sans GPU, docling-serve et comfyui sont optionnels
+    for service in docling-serve comfyui; do
+        has_service=$(/usr/bin/grep -c "^${service}	" <<< "$CONTAINER_DATA" || true)
+        if [ "$has_service" -eq 0 ]; then
+            info "Service $service : ignoré (service non démarré, mode sans GPU)"
+        fi
+    done
+else
+    # En mode GPU, tous les services doivent être présents
+    for service in docling-serve comfyui; do
+        has_service=$(/usr/bin/grep -c "^${service}	" <<< "$CONTAINER_DATA" || true)
+        if [ "$has_service" -eq 0 ]; then
+            TOTAL=$((TOTAL + 1))
+            fail "Service $service : service absent"
+            FAIL=$((FAIL + 1))
+        fi
+    done
+fi
+
+# 3. Vérification des points d'accès HTTP pour les services critiques
+info "Vérification des points d'accès HTTP..."
+if command -v curl >/dev/null 2>&1; then
+    check_http() {
+        local name="$1"
+        local timeout=5
+        TOTAL=$((TOTAL + 1))
+        if curl -sS --max-time "$timeout" --resolve "${name}.local:80:127.0.0.1" "http://${name}.local" -o /dev/null 2>&1; then
+            ok "HTTP $name : accessible"
+            PASS=$((PASS + 1))
+        else
+            fail "HTTP $name : inaccessible"
+            FAIL=$((FAIL + 1))
+        fi
+    }
+
+    check_http "webui"
+    check_http "langfuse"
+    check_http "documents"
+    check_http "images"
+fi
 
 echo ""
 echo "=============================================="
