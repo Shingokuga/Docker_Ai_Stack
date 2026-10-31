@@ -53,10 +53,6 @@ verify_prereqs() {
     fi
     ok "Groupe docker OK"
 
-    # git-lfs
-    if ! command -v git-lfs >/dev/null 2>&1; then
-        warn "git-lfs non trouvé — les modèles GGUF ne seront pas téléchargés"
-    fi
     ok "Prérequis vérifiés"
 }
 
@@ -66,17 +62,19 @@ verify_prereqs() {
 detect_gpu_tier() {
     local vram_mb=""
 
-    # Essayer nvidia-smi avec nounits
+    # Essayer nvidia-smi — capturer dans une variable pour tester le code de retour
+    # (ne pas utiliser de pipe car pipefail n'est pas toujours actif)
+    local nvidia_output
     if command -v nvidia-smi >/dev/null 2>&1; then
-        if vram_mb=$(nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits 2>/dev/null | head -1 | tr -d ' '); then
-            :
+        if nvidia_output=$(nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits 2>/dev/null) && [ -n "$nvidia_output" ]; then
+            vram_mb=$(echo "$nvidia_output" | head -1 | tr -d ' ')
         else
-            info "nvidia-smi a échoué — palier S par défaut"
+            echo "ℹ  nvidia-smi a échoué — palier S par défaut" >&2
             echo "S"
             return
         fi
     else
-        info "nvidia-smi absent — palier S par défaut"
+        echo "ℹ  nvidia-smi absent — palier S par défaut" >&2
         echo "S"
         return
     fi
@@ -94,30 +92,30 @@ detect_gpu_tier() {
                 mem_kb=$(/usr/bin/grep -m1 '^MemTotal:' /proc/meminfo | /usr/bin/awk '{print $2}')
                 if [ -n "$mem_kb" ]; then
                     vram_mb=$(( mem_kb / 1024 ))
-                    info "Mémoire système détectée : ${vram_mb} MB"
+                    echo "ℹ  Mémoire système détectée : ${vram_mb} MB" >&2
                 fi
             fi
         fi
     else
-        info "VRAM détectée : ${vram_mb} MB"
+        echo "ℹ  VRAM détectée : ${vram_mb} MB" >&2
     fi
 
     # Si toujours pas de valeur, palier S
     if ! [ "$vram_mb" -gt 0 ] 2>/dev/null; then
-        info "Impossible de détecter la mémoire — palier S par défaut"
+        echo "ℹ  Impossible de détecter la mémoire — palier S par défaut" >&2
         echo "S"
         return
     fi
 
     # Paliers : L ≥ 24 Go, M ≥ 8 Go, sinon S
     if [ "$vram_mb" -ge 24576 ]; then
-        info "Palier GPU détecté : L (≥24 Go)"
+        echo "ℹ  Palier GPU détecté : L (≥24 Go)" >&2
         echo "L"
     elif [ "$vram_mb" -ge 8192 ]; then
-        info "Palier GPU détecté : M (8 à 24 Go)"
+        echo "ℹ  Palier GPU détecté : M (8 à 24 Go)" >&2
         echo "M"
     else
-        info "Palier GPU détecté : S (<8 Go)"
+        echo "ℹ  Palier GPU détecté : S (<8 Go)" >&2
         echo "S"
     fi
 }
@@ -218,39 +216,6 @@ for s in result:
 # -------------------------------------------------------
 # c) Questions interactives ou mode --yes
 # -------------------------------------------------------
-get_env() {
-    local key="$1"
-    if [ -f .env ]; then
-        /usr/bin/grep -m1 "^${key}=" .env 2>/dev/null | /usr/bin/cut -d'=' -f2-
-    fi
-}
-
-set_env() {
-    local key="$1"
-    local value="$2"
-    # Pass value via env var to avoid shell injection in sed/awk
-    ENV_SET_KEY="$key" ENV_SET_VALUE="$value" python3 -c '
-import os
-key = os.environ["ENV_SET_KEY"]
-value = os.environ["ENV_SET_VALUE"]
-path = ".env"
-lines = []
-found = False
-if os.path.exists(path):
-    with open(path, "r") as f:
-        for line in f:
-            if line.startswith(key + "="):
-                lines.append(f"{key}={value}\n")
-                found = True
-            else:
-                lines.append(line)
-if not found:
-    lines.append(f"{key}={value}\n")
-with open(path, "w") as f:
-    f.writelines(lines)
-'
-}
-
 ask_config() {
     info "Configuration de la stack..."
 
