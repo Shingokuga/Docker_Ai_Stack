@@ -41,11 +41,20 @@ verify_prereqs() {
     ok "docker trouvé"
 
     # docker compose v2
-    if ! docker compose version >/dev/null 2>&1; then
-        err "docker compose v2 non trouvé. Lancez bootstrap.sh d'abord."
+    local compose_version
+    compose_version=$(docker compose version 2>&1)
+    if [ $? -ne 0 ]; then
+        err "docker compose v2 non trouvé ou indisponible : $compose_version. Lancez bootstrap.sh d'abord."
         exit 1
     fi
-    ok "docker compose v2 trouvé"
+    ok "docker compose v2 trouvé : $compose_version"
+
+    # Docker socket reachable
+    if ! docker info >/dev/null 2>&1; then
+        err "Le démon Docker n'est pas joignable (socket inactif ou permissions)."
+        exit 1
+    fi
+    ok "Docker socket joignable"
 
     # Groupe docker
     if ! groups | grep -q docker; then
@@ -234,9 +243,9 @@ ask_config() {
     local env_admin_email
     env_admin_email=$(get_env WEBUI_ADMIN_EMAIL)
     if [ $YES_MODE -eq 1 ]; then
-        ADMIN_EMAIL="${ADMIN_EMAIL:-${env_admin_email:-admin@${BASE_DOMAIN}}}"
+        ADMIN_EMAIL="${ADMIN_EMAIL:-${env_admin_email:-admin@stack.local}}"
     else
-        local email_hint="${env_admin_email:-admin@${BASE_DOMAIN}}"
+        local email_hint="${env_admin_email:-admin@stack.local}"
         info "Entrez l'email de l'administrateur pour Open WebUI et Langfuse :"
         read -r -e -p "Email admin (${email_hint}) : " -i "$email_hint" ADMIN_EMAIL
     fi
@@ -294,8 +303,18 @@ ask_config() {
             fi
             info "Palier GPU détecté : $detected"
             read -r -e -p "Palier GPU (M/S/L) — S=<8Go, M=8-24Go, L=≥24Go : " -i "$detected" GPU_TIER
-            GPU_TIER=$(echo "$GPU_TIER" | tr '[:lower:]' '[:upper:]')
         fi
+        GPU_TIER=$(echo "$GPU_TIER" | tr '[:lower:]' '[:upper:]')
+        while [[ "$GPU_TIER" != "S" && "$GPU_TIER" != "M" && "$GPU_TIER" != "L" ]]; do
+            if [ $YES_MODE -eq 1 ]; then
+                warn "GPU_Tier invalide ($GPU_TIER) — forcé à S"
+                GPU_TIER="S"
+                break
+            fi
+            warn "Palier GPU invalide : $GPU_TIER (doit être S, M ou L)"
+            read -r -e -p "Palier GPU (M/S/L) — S=<8Go, M=8-24Go, L=≥24Go : " -i "S" GPU_TIER
+            GPU_TIER=$(echo "$GPU_TIER" | tr '[:lower:]' '[:upper:]')
+        done
     fi
 }
 
@@ -315,6 +334,7 @@ create_env() {
     set_env WEBUI_ADMIN_EMAIL "$ADMIN_EMAIL"
     set_env LANGFUSE_INIT_USER_EMAIL "$ADMIN_EMAIL"
     set_env GPU_TIER "$GPU_TIER"
+    set_env NO_GPU "$NO_GPU"
     if [ "$COMFYUI_ENABLED" -eq 1 ]; then
         set_env COMPOSE_PROFILES "comfyui"
     else
@@ -591,6 +611,12 @@ final_summary() {
             local scheme="https"
             if [ "$host" = "certificat" ]; then
                 scheme="http"
+            fi
+            # Skip documents and images in no-gpu mode
+            if [ $NO_GPU -eq 1 ]; then
+                if [ "$host" = "documents" ] || [ "$host" = "images" ]; then
+                    continue
+                fi
             fi
             echo "  $label : ${scheme}://${host}.${BASE_DOMAIN}"
             hosts="${hosts} ${host}.${BASE_DOMAIN}"
