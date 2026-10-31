@@ -395,7 +395,15 @@ create_data_dirs() {
         run_as="sudo"
     fi
 
-    local DATA_DIR="./data"
+    local DATA_DIR="$(get_env DATA_DIR)"
+    if [ -z "$DATA_DIR" ]; then
+        DATA_DIR="./data"
+    fi
+    # Chemin relatif → racine du dépôt
+    if [[ "$DATA_DIR" != /* ]]; then
+        DATA_DIR="$REPO_ROOT/$DATA_DIR"
+    fi
+    export DATA_DIR
 
     $run_as mkdir -p "$DATA_DIR"
     $run_as mkdir -p "$DATA_DIR/postgres"
@@ -419,6 +427,18 @@ create_data_dirs() {
     $run_as chown -R 101:101 "$DATA_DIR/clickhouse/logs"
     $run_as mkdir -p "$DATA_DIR/s3"
     $run_as chown -R 10001:10001 "$DATA_DIR/s3"
+
+    # ComfyUI : ne créer ses dossiers que si le profil est activé
+    local COMPOSE_PROFILES="$(get_env COMPOSE_PROFILES)"
+    if [[ "$COMPOSE_PROFILES" == *"comfyui"* ]]; then
+        $run_as mkdir -p "$DATA_DIR/comfyui/custom_nodes"
+        $run_as mkdir -p "$DATA_DIR/comfyui/input"
+        $run_as mkdir -p "$DATA_DIR/comfyui/models"
+        $run_as mkdir -p "$DATA_DIR/comfyui/output"
+        $run_as mkdir -p "$DATA_DIR/comfyui/temp"
+        $run_as mkdir -p "$DATA_DIR/comfyui/user"
+    fi
+
     ok "Répertoires de données créés"
 }
 
