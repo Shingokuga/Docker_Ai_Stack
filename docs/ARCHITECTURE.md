@@ -25,9 +25,9 @@ La Stack Universelle AI est une plateforme de production complète qui orchestre
    │  ─────────────────  │   │  ────────────────────────    │   │  ──────────────────  │
    │  Open WebUI         │   │  LiteLLM (routage LLM)       │   │  Portainer          │
    │  N8N Automation     │   │  Docling OCR                 │   │  Langfuse Monitoring │
-   │  SearXNG Search     │   │  Whisper STT                 │   │  Grafana Dashboards  │
+   │  SearXNG Search     │   │  Whisper STT                 │   │                     │
    │  Langfuse Web       │   │  Kokoro TTS                  │   │                     │
-   │  MinIO Console      │   │  ComfyUI Generation          │   │                     │
+   │  Obscura Browser    │   │  ComfyUI Generation          │   │                     │
    │  Obscura Browser    │   │  Obscura MCP                 │   │                     │
    └─────────────────────┘   │  Ollama Embeddings          │   │                     │
                              └─────────────────────────────┘   │                     │
@@ -39,8 +39,8 @@ La Stack Universelle AI est une plateforme de production complète qui orchestre
          │  ──────────────     │   │  ────────────────  │   │  ────────────────────             │
          │  llama.cpp Server   │   │  Postgres 17       │   │  Redis 7                       │
          │  Ollama             │   │  Qdrant (vecteurs) │   │  ClickHouse                    │
-         │  Models GGUF        │   │  S3 (RustFS)       │   │  Loki (logs)                   │
-         │                     │   │                    │   │  Prometheus (metrics)           │
+         │  Models GGUF        │   │  S3 (RustFS)       │   │
+         │                     │   │                    │   │
          └─────────────────────┘   └────────────────────┘   └────────────────────────────────┘
 ```
 
@@ -64,7 +64,7 @@ La Stack Universelle AI est une plateforme de production complète qui orchestre
 | n8n | https://automatisation.{BASE_DOMAIN} | Automation workflows |
 | n8n-worker | - | Worker pour tâches n8n |
 | litellm | https://api.{BASE_DOMAIN} | Routage unifié vers LLM |
-| searxng | https://recherche.{BASE_DOMAIN} | Moteur de recherche privé |
+| searxng | https://chat-ai.{BASE_DOMAIN}/search | Moteur de recherche privé |
 | portainer | https://admin.{BASE_DOMAIN} | Administration Docker |
 
 ### Multimédia & Vision
@@ -82,7 +82,6 @@ La Stack Universelle AI est une plateforme de production complète qui orchestre
 
 | Service | URL | Rôle |
 |---------|-----|------|
-| grafana | https://monitoring.{BASE_DOMAIN} | Dashboards et visualisation |
 | langfuse-web | https://suivi-ia.{BASE_DOMAIN} | Monitoring et tracing IA |
 | langfuse-worker | - | Worker pour Langfuse |
 | clickhouse | - | Base de données analytics Langfuse |
@@ -149,12 +148,12 @@ Utilisateur → Open WebUI → ComfyUI API → Qwen-Image (GPU)
 | open-webui | 8080 |
 | n8n | 5678 |
 | comfyui | 8188 |
-| docling-serve | 8000 |
-| whisper | 9000 |
-| kokoro | 8000 |
+| docling-serve | 5001 |
+| whisper | 8000 |
+| kokoro | 8880 |
 | obscura | 9222 (CDP) |
 | obscura-mcp | 3000 |
-| grafana | 3000 |
+| langfuse | 3000 |
 | langfuse | 3000 |
 | s3 (rustfs) | 9000 |
 
