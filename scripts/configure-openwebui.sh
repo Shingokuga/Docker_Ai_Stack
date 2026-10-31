@@ -32,7 +32,7 @@ if [[ ! -f "$ENV_FILE" ]]; then
 fi
 
 get_env() {
-    grep "^$1=" "$ENV_FILE" | cut -d= -f2- | head -1
+    grep "^$1=" "$ENV_FILE" | cut -d= -f2- | head -1 || true
 }
 
 WEBUI_ADMIN_EMAIL=$(get_env WEBUI_ADMIN_EMAIL)
@@ -46,12 +46,17 @@ if [[ -z "$WEBUI_ADMIN_EMAIL" || -z "$WEBUI_ADMIN_PASSWORD" ]]; then
     exit 1
 fi
 
+if [[ -z "$OBSCURA_MCP_TOKEN" ]]; then
+    echo "ERREUR: OBSCURA_MCP_TOKEN absent ou vide dans .env"
+    exit 1
+fi
+
 echo "Connexion à Open WebUI..."
 
 # Méthode: curl via le réseau Docker (le plus sûr)
 exec_cmd() {
     ./stack exec -T open-webui curl -s -k -X "$1" \
-        -H "Authorization: Bearer ***" \
+        -H "Authorization: Bearer $2" \
         -H "Content-Type: application/json" \
         ${3:+"-d" "$3"} \
         "$4"
