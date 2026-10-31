@@ -461,11 +461,43 @@ start_stack() {
 # -------------------------------------------------------
 # i) Configuration de Open WebUI
 # -------------------------------------------------------
+wait_webui() {
+    local timeout="${WEBUI_WAIT_SECONDS:-300}"
+    local interval=5
+    local elapsed=0
+    local attempt=0
+
+    info "Attente d'Open WebUI (timeout ${timeout}s)..."
+
+    while [ $elapsed -lt $timeout ]; do
+        attempt=$((attempt + 1))
+        if ./stack exec -T open-webui curl -fsS http://localhost:8080/health >/dev/null 2>&1; then
+            ok "Open WebUI prêt après $attempt essai(s) (${elapsed}s)"
+            return 0
+        fi
+        printf "."
+        sleep "$interval"
+        elapsed=$((elapsed + interval))
+    done
+
+    echo ""
+    warn "Open WebUI pas prêt après ${timeout}s (${attempt} essais)"
+    return 1
+}
+
 configure_webui() {
     if [ -f scripts/configure-openwebui.sh ]; then
+        if ! wait_webui; then
+            warn "Configurez plus tard avec : bash scripts/configure-openwebui.sh"
+            return 0
+        fi
         info "Configuration de Open WebUI (compte admin + outils MCP)..."
-        bash scripts/configure-openwebui.sh
-        ok "Open WebUI configuré"
+        if bash scripts/configure-openwebui.sh; then
+            ok "Open WebUI configuré"
+        else
+            warn "Échec de configuration — relancez plus tard : bash scripts/configure-openwebui.sh"
+            return 0
+        fi
     else
         warn "scripts/configure-openwebui.sh manquant — configuration WebUI ignorée"
     fi
