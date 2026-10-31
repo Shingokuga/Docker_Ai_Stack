@@ -2,189 +2,125 @@
 
 ## Sauvegarde
 
-### Stratégie de sauvegarde
+### État actuel
 
-La stack utilise **Borg Backup** pour des sauvegardes incrémentales compressées.
+Aucun mécanisme de sauvegarde n'est fourni. Les données sont stockées dans des bind mounts dans le répertoire `data/`.
 
-### Sauvegarde des données
+### Dossiers à sauvegarder
 
-```bash
-# Sauvegarder tous les volumes
-./stack backup --type full
+Les données critiques sont dans les dossiers suivants (relatifs à `DATA_DIR`, par défaut `./data`):
 
-# Sauvegarde incrémentale
-./stack backup --type incremental
+| Dossier | Service | Contenu |
+|---------|---------|---------|
+| `data/postgres` | PostgreSQL | Bases de données n8n, Langfuse, LiteLLM, Open WebUI |
+| `data/redis` | Redis | File d'attente n8n, Langfuse, cache LiteLLM |
+| `data/qdrant` | Qdrant | Vecteurs pour RAG |
+| `data/ollama` | Ollama | Modèles LLM locaux |
+| `data/models` | llama-server | Modèles GGUF |
+| `data/open-webui` | Open WebUI | Fichiers de l'application (la base est dans Postgres) |
+| `data/n8n` | n8n | Workflows et exécutions |
+| `data/n8n_shared` | n8n | Fichiers partagés |
+| `data/portainer` | Portainer | Configuration Portainer |
+| `data/caddy` | Caddy | Certificats TLS |
+| `data/comfyui` | ComfyUI | Modèles, output, custom nodes |
+| `data/whisper` | Whisper | Cache HuggingFace |
+| `data/clickhouse` | ClickHouse | Traces Langfuse |
+| `data/s3` | RustFS (S3) | Stockage objets |
 
-# Restaurer
-./stack restore --date 2026-01-01
-```
-
-### Sauvegarde des configurations
-
-```bash
-# Sauvegarder les fichiers de configuration
-tar -czf config-backup-$(date +%Y%m%d).tar.gz \
-  .env versions.env caddy/ config/
-```
-
-### Fréquence recommandée
-
-| Type | Fréquence |
-|------|-----------|
-| Full | Hebdomadaire |
-| Incremental | Quotidienne |
-| Config | Avant chaque mise à jour |
+`data/postgres` est en mode 700, propriétaire utilisateur interne du conteneur. Une sauvegarde par copie de fichiers exige root et la stack arrêtée. Copier les fichiers d'une base en marche n'est pas cohérent. À prévoir : sauvegarde de Postgres par `pg_dump` ou `pg_dumpall` (non fourni, non testé).
 
 ## Monitoring et alertes
 
-### Grafana
+### État actuel
 
-Accéder aux dashboards à `https://monitoring.{BASE_DOMAIN}`.
+Aucun système de monitoring ou d'alerting n'est déployé dans la stack.
 
-### Dashboards principaux
+### Supervision basique
 
-- **Overview**: Vue d'ensemble de la stack
-- **LLM**: Utilisation des modèles
-- **Services**: Statut des services
-- **Infra**: CPU, RAM, disque, réseau
+```bash
+# Vérifier l'état des conteneurs
+./stack ps
 
-### Alertes
+# Consulter les logs d'un service
+./stack logs -f service-name
 
-Configurer les alertes dans Grafana:
+# Tester la stack
+./test-stack.sh
+```
 
-1. Dashboard → Panneau → Éditer
-2. Onglet "Alerting"
-3. Définir les conditions et notifications
+### GPU
 
-### Canal de notification
-
-- Slack webhook
-- Email
-- PagerDuty
+```bash
+# Vérifier l'utilisation GPU
+nvidia-smi
+```
 
 ## Logs
 
-### Centralisation avec Loki
-
-Tous les logs sont centralisés dans Loki et consultables via Grafana.
-
-### Consulter les logs d'un service
+### Consulter les logs
 
 ```bash
-# Via Docker
-./stack logs -f service-name
+# Logs d'un service spécifique
+./stack logs -f open-webui
 
-# Via Loki/Grafana
-# Explorec Logs → Filtrer par service
+# Logs de tous les services
+./stack logs
+
+# Dernières lignes
+./stack logs --tail=100 service-name
 ```
 
-### Rotation des logs
+### Rotation
 
-La rotation est configurée dans `docker-compose.yml`:
-
-```yaml
-logging:
-  driver: json-file
-  options:
-    max-size: "10m"
-    max-file: "3"
-```
-
-Cela limite chaque fichier de log à 10 Mo et garde 3 fichiers.
+La rotation des logs est déjà configurée dans `docker-compose.yml` pour les 24 services : driver `json-file`, `max-size` 10 Mo, `max-file` 3.
 
 ## Mises à jour
 
-### Mise à jour des images
+### Mise à jour des versions des images
+
+Les versions sont définies dans `versions.env`:
 
 ```bash
-# Pull les nouvelles images
+# 1. Modifier versions.env avec les nouvelles versions
+nano versions.env
+
+# 2. Puller les nouvelles images
 ./stack pull
 
-# Redémarrer la stack
-./stack down
+# 3. Redéployer
 ./stack up -d
 ```
 
-### Mise à jour des modèles
+### Mise à jour des configurations
 
-```bash
-# Télécharger les nouveaux modèles
-./download-models.sh
-
-# Redémarrer les services concernés
-./stack restart llama-server ollama
-```
-
-### Mise à jour de la configuration
+Après modification de `.env`, recréez le conteneur :
 
 ```bash
 # Modifier la configuration
 nano .env
 
-# Redémarrer les services concernés
-./stack restart
+# Recréer le conteneur (recharge les variables d'environnement)
+./stack up -d service-name
 ```
 
-## Performance
+`./stack restart` ne relit pas les variables d'environnement : il redémarre simplement le conteneur avec la même configuration.
 
-### Monitoring GPU
-
-```bash
-# Via nvidia-smi
-nvidia-smi
-
-# Via Grafana dashboard GPU
-```
-
-### Optimisation
-
-- **LLM**: Ajuster `LLM_CTX` et le modèle GGUF selon les besoins
-- **ComfyUI**: Utiliser `--lowvram` ou `--medvram` si VRAM limitée
-- **Redis**: Vérifier `maxmemory-policy noeviction` pour n8n/Langfuse
-
-### Scaling
-
-Pour le scaling, envisager:
-
-- Ajouter plus de conteneurs pour les services stateless
-- Scaling horizontal des workers n8n
-- Réplication de la base de données
-
-## Sauvegarde et restauration des bases de données
-
-### Postgres
+### Mise à jour des modèles
 
 ```bash
-# Sauvegarde
-docker exec postgres pg_dump -U postgres -d n8n > n8n-backup.sql
-docker exec postgres pg_dump -U postgres -d langfuse > langfuse-backup.sql
+# Télécharger les modèles
+./download-models.sh
 
-# Restauration
-docker exec -i postgres psql -U postgres -d n8n < n8n-backup.sql
-```
-
-### Qdrant
-
-```bash
-# Sauvegarde
-docker exec qdrant qdrant snapshot create all
+# Recréer llama-server (recharge les modèles GGUF)
+./stack up -d llama-server
 ```
 
 ## Nettoyage
 
-### Images Docker
+### Images orphelines
 
 ```bash
-# Supprimer les images orphelines
 docker image prune -f
-
-# Supprimer tous les volumes orphelines
-docker volume prune -f
 ```
 
-### Logs Docker
-
-```bash
-# Supprimer les vieux logs
-docker system prune --volumes --filter "until=7d"
-```
+Attention : `docker image prune` supprime les images inutilisées de tout l'hôte, pas seulement de cette stack.
