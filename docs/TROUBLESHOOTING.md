@@ -17,7 +17,7 @@
 
 # Vérifier les ports
 docker network ls
-docker network inspect ai_net
+docker network inspect ustack_ai_net
 ```
 
 ### Service ne répond pas
@@ -78,9 +78,9 @@ sudo systemctl restart docker
 # Vérifier l'espace disque
 df -h
 
-# Vérifier les volumes
-docker volume ls
-docker inspect $(docker volume ls -q)
+# Vérifier les volumes (bind mounts sous data/)
+du -sh data/* 2>/dev/null
+# Note: certains dossiers (data/postgres) sont illisibles sans root
 ```
 
 ### Erreurs réseau
@@ -92,7 +92,7 @@ docker inspect $(docker volume ls -q)
 ```bash
 # Vérifier le réseau
 docker network ls
-docker network inspect ai_net
+docker network inspect ustack_ai_net
 
 # Tester la connectivité
 docker exec container1 ping container2
@@ -119,26 +119,25 @@ docker exec container1 ping container2
 ./test-stack.sh
 ```
 
-Ce script vérifie:
-- Tous les conteneurs sont démarrés
-- Les services répondent
-- Les connexions réseau fonctionnent
-- Les services critiques sont opérationnels
+Ce script vérifie pour chaque hôte listé dans caddy/hostnames.txt:
+- Un curl -fsS avec un timeout de 5 s sur la page d'accueil en HTTPS
+- Le certificat interne est accepté (hôte : /root.crt en HTTP)
+- Affiche le Total, OK et Échecs des tests
+- Code de sortie 1 s'il y a au moins un échec
+Il ne vérifie pas l'état des conteneurs.
 
 ### Tests individuels
 
 ```bash
 # Tester le LLM
-curl -X POST http://litellm:4000/v1/chat/completions \
   -H "Authorization: Bearer sk-xxxx" \
   -d '{"model":"chat","messages":[{"role":"user","content":"test"}]}'
 
 # Tester le GPU
 nvidia-smi
 
-# Tester les ports
-curl http://localhost:80
-curl http://localhost:443
+# Tester les ports (uniquement caddy publie des ports)
+./test-stack.sh
 ```
 
 ## Problèmes spécifiques aux services
@@ -158,7 +157,7 @@ bash scripts/configure-openwebui.sh
 ### ComfyUI
 
 **Problème:** VRAM insuffisante.
-**Solution:** Ajouter `--lowvram` à `COMFYUI_START_COMMAND`.
+**Solution:** Ajouter `--lowvram` à la fin de la valeur de COMFYUI_START_COMMAND dans docker-compose.yml (service comfyui), puis `./stack up -d comfyui`.
 
 **Problème:** Modèles non chargés.
 **Solution:**
