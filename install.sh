@@ -480,18 +480,58 @@ final_summary() {
     echo "Installation terminée !"
     echo "=============================================="
     echo ""
-    echo "🌐 URLs de la stack (https) :"
-    echo "  Chat AI : https://chat-ai.${BASE_DOMAIN}"
-    echo "  n8n Automation : https://automatisation.${BASE_DOMAIN}"
-    echo "  Langfuse Monitoring : https://suivi-ia.${BASE_DOMAIN}"
-    echo "  Portainer Admin : https://admin.${BASE_DOMAIN}"
-    echo "  API : https://api.${BASE_DOMAIN}"
-    echo "  Documents : https://documents.${BASE_DOMAIN}"
-    echo "  Stockage S3 : https://stockage.${BASE_DOMAIN}"
+
+    # Read hostnames and map to labels
+    declare -A HOST_LABELS=(
+        [chat-ai]="Chat AI"
+        [automatisation]="n8n Automation"
+        [suivi-ia]="Langfuse Monitoring"
+        [admin]="Portainer Admin"
+        [documents]="Documents (Docling)"
+        [api]="API LiteLLM"
+        [stockage]="Stockage S3 (MinIO)"
+        [certificat]="Certificat racine"
+        [images]="ComfyUI Images"
+    )
+
+    echo "🌐 URLs de la stack :"
+    local hosts=""
+    if [ -f caddy/hostnames.txt ]; then
+        while IFS= read -r host || [ -n "$host" ]; do
+            # Skip empty lines and comments
+            [ -z "$host" ] && continue
+            [[ "$host" =~ ^# ]] && continue
+            
+            local label="${HOST_LABELS[$host]:-$host}"
+            local scheme="https"
+            if [ "$host" = "certificat" ]; then
+                scheme="http"
+            fi
+            echo "  $label : ${scheme}://${host}.${BASE_DOMAIN}"
+            hosts="${hosts} ${host}.${BASE_DOMAIN}"
+        done < caddy/hostnames.txt
+    fi
     echo ""
-    echo "Pour trouver le mot de passe admin : vérifiez le fichier .env"
+
+    # Browser warning about self-signed cert
+    echo "Avertissement du navigateur : installez le certificat racine :"
+    echo "  http://certificat.${BASE_DOMAIN}/root.crt"
+    echo ""
+
+    # Admin account
+    echo "Compte administrateur : voir WEBUI_ADMIN_EMAIL et WEBUI_ADMIN_PASSWORD dans le fichier .env"
+    echo ""
+
+    # Local domain /etc/hosts advice
+    if [[ "$BASE_DOMAIN" != *.* ]] || [[ "$BASE_DOMAIN" == *.local ]]; then
+        echo "Domaine local détecté — ajoutez à /etc/hosts :"
+        echo "  127.0.0.1${hosts}"
+        echo ""
+    fi
+
+    # Final advice
     echo "Pour vérifier la stack : ./test-stack.sh"
-    echo "Pour voir les logs : docker compose logs -f"
+    echo "Pour voir les logs : ./stack logs -f"
 }
 
 # -------------------------------------------------------
