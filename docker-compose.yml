@@ -774,7 +774,7 @@ services:
       - "3030"
     healthcheck:
       # wget présent dans l'image (UBI micro + wget, cf. Dockerfile); route /api/health du worker
-      test: ["CMD-SHELL", "wget -q --spider http://127.0.0.1:3030/api/health"]
+      test: ["CMD-SHELL", "wget -q --spider http://$${HOSTNAME}:3030/api/health"]
       interval: 20s
       timeout: 10s
       retries: 10
