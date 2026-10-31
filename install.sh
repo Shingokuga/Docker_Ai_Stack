@@ -226,7 +226,7 @@ ask_config() {
         BASE_DOMAIN="${BASE_DOMAIN:-${env_base_domain:-local}}"
     else
         local domain_hint="${env_base_domain:-local}"
-        info "Entrez le domaine de base (ex: exemple.com) ou 'local' pour http://localhost :"
+        info "Entrez le domaine de base (ex: exemple.com) ou 'local' (adresses chat-ai.local, etc. ; voir le conseil /etc/hosts affiché à la fin) :"
         read -r -e -p "Domaine (${domain_hint}) : " -i "$domain_hint" BASE_DOMAIN
     fi
 
@@ -574,7 +574,7 @@ final_summary() {
         [admin]="Portainer Admin"
         [documents]="Documents (Docling)"
         [api]="API LiteLLM"
-        [stockage]="Stockage S3 (MinIO)"
+        [stockage]="Console S3 (RustFS)"
         [certificat]="Certificat racine"
         [images]="ComfyUI Images"
     )

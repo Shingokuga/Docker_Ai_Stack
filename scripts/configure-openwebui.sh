@@ -5,20 +5,14 @@ set -euo pipefail
 # Configure les serveurs MCP (Obscura, Context7) dans Open WebUI via l'API admin.
 # Idempotent : fusionne par info.id, ne supprime jamais les connexions existantes.
 #
-# Contexte vérifié dans Open WebUI v0.12.5 :
-# - TOOL_SERVER_CONNECTIONS est lu UNE SEULE FOIS au 1er démarrage, ensuite la base prime
-# - Les MCP sont réservés aux admins dans Open WebUI
-# - Chaque utilisateur active les outils par chat dans "Intégrations"
-#
 # Routes utilisées :
 # POST /api/v1/auths/signin          -> {token}
 # GET  /api/v1/configs/tool_servers  -> {"TOOL_SERVER_CONNECTIONS":[...]}
-# POST /api/v1/configs/tool_servers  -> remplace toute la liste (fusion par info.id)
+# POST /api/v1/configs/tool_servers  -> {"TOOL_SERVER_CONNECTIONS":[...]} (fusion par info.id)
 #
 # Connexions configurées :
 # - obscura     : http://obscura-mcp:3000/mcp (navigateur)
 # - context7    : https://mcp.context7.com/mcp (documentation, si clé)
-# - comfyui     : (futur) serveur MCP ComfyUI
 #
 # Prérequis : jq installé (par bootstrap.sh)
 
@@ -27,7 +21,7 @@ cd "$REPO"
 
 ENV_FILE=".env"
 if [[ ! -f "$ENV_FILE" ]]; then
-    echo "ERREUR: $ENV_FILE introuvable"
+    echo "ERREUR: $ENV_FILE introuvable" >&2
     exit 1
 fi
 
@@ -39,15 +33,14 @@ WEBUI_ADMIN_EMAIL=$(get_env WEBUI_ADMIN_EMAIL)
 WEBUI_ADMIN_PASSWORD=$(get_env WEBUI_ADMIN_PASSWORD)
 OBSCURA_MCP_TOKEN=$(get_env OBSCURA_MCP_TOKEN)
 CONTEXT7_API_KEY=$(get_env CONTEXT7_API_KEY)
-BASE_DOMAIN=$(get_env BASE_DOMAIN)
 
 if [[ -z "$WEBUI_ADMIN_EMAIL" || -z "$WEBUI_ADMIN_PASSWORD" ]]; then
-    echo "ERREUR: WEBUI_ADMIN_EMAIL ou WEBUI_ADMIN_PASSWORD non défini dans .env"
+    echo "ERREUR: WEBUI_ADMIN_EMAIL ou WEBUI_ADMIN_PASSWORD non défini dans .env" >&2
     exit 1
 fi
 
 if [[ -z "$OBSCURA_MCP_TOKEN" ]]; then
-    echo "ERREUR: OBSCURA_MCP_TOKEN absent ou vide dans .env"
+    echo "ERREUR: OBSCURA_MCP_TOKEN absent ou vide dans .env" >&2
     exit 1
 fi
 
@@ -72,115 +65,104 @@ exec_cmd_noauth() {
 # Connexion
 login_json=$(jq -n --arg e "$WEBUI_ADMIN_EMAIL" --arg p "$WEBUI_ADMIN_PASSWORD" '{email:$e,password:$p}')
 login_resp=$(exec_cmd_noauth POST "$login_json" "http://localhost:8080/api/v1/auths/signin")
-token=$(echo "$login_resp" | jq -r '.token' 2>/dev/null)
+token=$(echo "$login_resp" | jq -r '.token // empty' 2>/dev/null || true)
 if [[ -z "$token" ]]; then
-    echo "ERREUR: Connexion échouée"
-    echo "Réponse: $login_resp"
+    echo "ERREUR: Connexion échouée" >&2
+    # Extraire le détail si la réponse est un objet JSON valide
+    detail=$(echo "$login_resp" | jq -r '
+        if type == "object" then
+            if .detail then
+                if (.detail | type) == "string" then .detail
+                elif (.detail | type) == "array" then
+                    [.detail[] | if .msg then .msg elif type == "string" then . else "erreur inconnue" end] | join("; ")
+                else "erreur inconnue" end
+            else "réponse inattendue" end
+        else "réponse inattendue" end' 2>/dev/null || true)
+    if [[ -z "$detail" ]]; then
+        detail="réponse inattendue"
+    fi
+    echo "$detail" >&2
     exit 1
 fi
 
 echo "Connecté. Configuration des serveurs MCP..."
 
-# Récupérer la liste existante des connexions MCP
+# Récupérer la liste existante des connexions MCP (objet avec TOOL_SERVER_CONNECTIONS)
 existing=$(exec_cmd GET "$token" "" "http://localhost:8080/api/v1/configs/tool_servers")
-echo "$existing" > /tmp/openwebui_existing_connections.json
 
-# Fonction pour fusionner les connexions MCP par info.id
-merge_connections() {
-    local existing_file="$1"
-    local obscura_conn="$2"
-    local context7_conn="$3"
-
-    python3 -c "
-import json
-
-existing = json.load(open('$existing_file'))
-if isinstance(existing, dict) and 'TOOL_SERVER_CONNECTIONS' in existing:
-    existing = existing['TOOL_SERVER_CONNECTIONS']
-elif not isinstance(existing, list):
-    existing = []
-
-obscura = json.loads('''$obscura_conn''')
-context7 = json.loads('''$context7_conn''')
-
-# Fusionner: garder les autres connexions, ajouter/mettre à jour obscura et context7
-merged = []
-for conn in existing:
-    if conn.get('info', {}).get('id') in ['obscura', 'context7']:
-        continue  # Sera ajouté en version mise à jour
-    merged.append(conn)
-
-merged.append(obscura)
-merged.append(context7)
-
-print(json.dumps(merged))
-"
-}
-
-# Construire les connexions MCP
-obscura_conn=$(cat <<OBSCURA_JSON
-{
-    "type": "mcp",
-    "url": "http://obscura-mcp:3000/mcp",
-    "path": "",
-    "auth_type": "bearer",
-    "key": "$OBSCURA_MCP_TOKEN",
-    "config": {"enable": true},
-    "info": {
-        "id": "obscura",
-        "name": "Navigateur (Obscura)",
-        "description": "Navigation web, lecture de pages, formulaires, captures d'écran et PDF."
-    }
-}
-OBSCURA_JSON
-)
-
-if [[ -n "$CONTEXT7_API_KEY" ]]; then
-    context7_conn=$(cat <<CONTEXT7_JSON
-{
-    "type": "mcp",
-    "url": "https://mcp.context7.com/mcp",
-    "path": "",
-    "auth_type": "bearer",
-    "key": "$CONTEXT7_API_KEY",
-    "config": {"enable": true},
-    "info": {
-        "id": "context7",
-        "name": "Documentation (Context7)",
-        "description": "Recherche et génération de documentation technique."
-    }
-}
-CONTEXT7_JSON
-)
-else
-    context7_conn=$(cat <<CONTEXT7_JSON
-{
-    "type": "mcp",
-    "url": "https://mcp.context7.com/mcp",
-    "path": "",
-    "auth_type": "bearer",
-    "key": "",
-    "config": {"enable": false},
-    "info": {
-        "id": "context7",
-        "name": "Documentation (Context7)",
-        "description": "Recherche et génération de documentation technique."
-    }
-}
-CONTEXT7_JSON
-)
+# Valider la réponse du GET : doit être un objet JSON avec TOOL_SERVER_CONNECTIONS en tableau
+if ! echo "$existing" | jq -e 'type == "object" and (.TOOL_SERVER_CONNECTIONS | type == "array")' >/dev/null 2>&1; then
+    echo "ERREUR: lecture de la configuration Open WebUI impossible" >&2
+    detail=$(echo "$existing" | jq -r '
+        if type == "object" then
+            if .detail then
+                if (.detail | type) == "string" then .detail
+                elif (.detail | type) == "array" then
+                    [.detail[] | if .msg then .msg elif type == "string" then . else "erreur inconnue" end] | join("; ")
+                else "erreur inconnue" end
+            else "réponse inattendue" end
+        else "réponse inattendue" end' 2>/dev/null || true)
+    if [[ -z "$detail" ]]; then
+        detail="réponse inattendue"
+    fi
+    echo "$detail" >&2
+    exit 1
 fi
 
-# Fusionner et POST
-merged=$(merge_connections /tmp/openwebui_existing_connections.json "$obscura_conn" "$context7_conn")
-echo "$merged" > /tmp/openwebui_merged_connections.json
+existing_list=$(echo "$existing" | jq -c '.TOOL_SERVER_CONNECTIONS' 2>/dev/null || true)
+if [[ -z "$existing_list" || "$existing_list" == "null" ]]; then
+    existing_list="[]"
+fi
 
-resp=$(exec_cmd POST "$token" "$(echo "$merged" | jq -c '.')" "http://localhost:8080/api/v1/configs/tool_servers")
+# Construire les connexions MCP avec type "mcp" (requis par l'API)
+obscura_conn=$(jq -n \
+    --arg key "$OBSCURA_MCP_TOKEN" \
+    '{url: "http://obscura-mcp:3000/mcp", path: "", auth_type: "bearer", key: $key, type: "mcp", config: {enable: true}, info: {id: "obscura", name: "Navigateur (Obscura)"}}')
+
+if [[ -n "$CONTEXT7_API_KEY" ]]; then
+    context7_conn=$(jq -n \
+        --arg key "$CONTEXT7_API_KEY" \
+        '{url: "https://mcp.context7.com/mcp", path: "", auth_type: "bearer", key: $key, type: "mcp", config: {enable: true}, info: {id: "context7", name: "Documentation (Context7)"}}')
+else
+    context7_conn=$(jq -n \
+        '{url: "https://mcp.context7.com/mcp", path: "", auth_type: "bearer", key: "", type: "mcp", config: {enable: false}, info: {id: "context7", name: "Documentation (Context7)"}}')
+fi
+
+# Fusion par info.id en jq : garder les connexions existantes dont l'id n'est pas obscura/context7
+merged=$(jq -n \
+    --argjson existing "$existing_list" \
+    --argjson obscura "$obscura_conn" \
+    --argjson context7 "$context7_conn" \
+    '[$existing[] | select(.info.id != "obscura" and .info.id != "context7")] + [$obscura, $context7]')
+
+# POST avec le corps objet (TOOL_SERVER_CONNECTIONS)
+resp=$(exec_cmd POST "$token" "$(jq -n --argjson list "$merged" '{TOOL_SERVER_CONNECTIONS: $list}')" "http://localhost:8080/api/v1/configs/tool_servers")
+
+# Vérifier que le POST a été accepté
+if ! echo "$resp" | jq -e 'type == "object" and (.TOOL_SERVER_CONNECTIONS | type == "array")' >/dev/null 2>&1; then
+    echo "ERREUR: Open WebUI a refusé la configuration" >&2
+    # Extraire les messages d'erreur sans exposer .input ni la réponse brute
+    detail_msgs=$(echo "$resp" | jq -r '
+        if type == "object" then
+            if .detail then
+                if (.detail | type) == "string" then .detail
+                elif (.detail | type) == "array" then
+                    [.detail[] | if .msg then .msg elif type == "string" then . else "erreur inconnue" end] | join("; ")
+                else "erreur inconnue" end
+            else "réponse inattendue" end
+        else "réponse inattendue" end' 2>/dev/null || true)
+    if [[ -z "$detail_msgs" ]]; then
+        detail_msgs="réponse inattendue"
+    fi
+    echo "$detail_msgs" >&2
+    exit 1
+fi
+
 echo "Configuration envoyée."
 
-# Vérifier
+# Vérification finale
 final=$(exec_cmd GET "$token" "" "http://localhost:8080/api/v1/configs/tool_servers")
 echo "Connexions MCP configurées:"
-echo "$final" | jq -c '.[] | {id: .info.id, name: .info.name, enabled: .config.enable}'
+echo "$final" | jq -r '.TOOL_SERVER_CONNECTIONS[] | "\(.info.id): \(.info.name) (enable: \(.config.enable))"' 2>/dev/null || true
 
 echo "Configuration terminée."
