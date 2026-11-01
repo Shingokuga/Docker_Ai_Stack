@@ -1,5 +1,8 @@
 name: CI
 
+# GitHub Actions CI for Docker AI Stack
+# Jobs: statique (syntax/shellcheck/config validation), demarrage (full stack test)
+
 on:
   push:
     branches: [ '**' ]
