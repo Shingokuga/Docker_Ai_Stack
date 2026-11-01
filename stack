@@ -1,3 +1,145 @@
 #!/usr/bin/env bash
+set -euo pipefail
 cd "$(dirname "$(readlink -f "$0")")"
-exec docker compose --env-file versions.env --env-file .env "$@"
+VERSIONS_FILE="versions.env"
+usage() {
+  cat <<EOF
+Usage: ./stack <subcommand> [options]
+Subcommands: versions, update, pull, ps, logs, start, stop, restart, down, exec, compose
+Examples: ./stack versions, ./stack update ollama litellm
+EOF
+}
+cmd_versions() {
+  echo "=== Docker_Ai_Stack Versions ==="
+  echo ""
+  if [[ ! -f "$VERSIONS_FILE" ]]; then
+    echo "Error: $VERSIONS_FILE not found"
+    return 1
+  fi
+  echo "From $VERSIONS_FILE:"
+  echo "--------------------"
+  while IFS='=' read -r key value; do
+    if [[ -z "$key" ]] || [[ "$key" =~ ^[[:space:]]*# ]]; then continue; fi
+    printf "  %-20s %s\n" "$key:" "$value"
+  done < "$VERSIONS_FILE"
+  echo ""
+  echo "Running containers:"
+  echo "-------------------"
+  docker compose --env-file "$VERSIONS_FILE" --env-file .env ps --format "table {{.Name}}\t{{.Image}}\t{{.Status}}" 2>/dev/null || echo "  (no running containers)"
+}
+cmd_update() {
+  local services=("$@")
+  local backup_dir=".wts/updates/$(date +%Y%m%d_%H%M%S)"
+  local snapshot_file="$backup_dir/versions.env.bak"
+  echo "=== Docker_Ai_Stack Update ==="
+  echo ""
+  if [[ -z "${services[0]:-}" ]]; then
+    echo "Updating ALL services"
+  else
+    echo "Updating services: ${services[*]}"
+  fi
+  echo ""
+  echo "Step 1/5: Creating backup..."
+  mkdir -p "$backup_dir"
+  cp "$VERSIONS_FILE" "$snapshot_file"
+  echo "  Backup saved to: $snapshot_file"
+  echo ""
+  echo "Step 2/5: Checking for newer versions..."
+  if [[ -z "${services[0]:-}" ]]; then
+    echo "  Pulling all images..."
+    docker compose --env-file "$VERSIONS_FILE" --env-file .env pull 2>&1 | tail -5
+    echo "  All images pulled"
+  else
+    for svc in "${services[@]}"; do
+      check_and_update_service "$svc"
+    done
+  fi
+  echo ""
+  echo "Step 3/5: Recreating affected containers..."
+  if [[ -z "${services[0]:-}" ]]; then
+    docker compose --env-file "$VERSIONS_FILE" --env-file .env up -d 2>&1 | tail -5
+  else
+    for svc in "${services[@]}"; do
+      echo "  Recreating: $svc"
+      docker compose --env-file "$VERSIONS_FILE" --env-file .env up -d "$svc" 2>&1 | tail -3
+    done
+  fi
+  echo ""
+  echo "Step 4/5: Testing stack health..."
+  local test_result=0
+  if [[ -f "test-stack.sh" ]]; then
+    ./test-stack.sh || test_result=$?
+  else
+    echo "  test-stack.sh not found, running basic health check..."
+    docker compose --env-file "$VERSIONS_FILE" --env-file .env ps --format "table {{.Name}}\t{{.Status}}" || test_result=$?
+  fi
+  if [[ $test_result -ne 0 ]]; then
+    echo ""
+    echo "Step 5/5: Test FAILED - rolling back..."
+    echo "  Restoring versions.env from backup..."
+    cp "$snapshot_file" "$VERSIONS_FILE"
+    echo "  Recreating containers with old versions..."
+    docker compose --env-file "$VERSIONS_FILE" --env-file .env up -d 2>&1 | tail -5
+    echo "  Rolled back to: $snapshot_file"
+    return 1
+  fi
+  echo ""
+  echo "Step 5/5: Test PASSED"
+  echo ""
+  echo "=== Update Complete ==="
+  rm -rf "$backup_dir"
+}
+check_and_update_service() {
+  local service="$1"
+  local img_var=""
+  case "$service" in
+    postgres) img_var="IMG_POSTGRES" ;;
+    redis) img_var="IMG_REDIS" ;;
+    qdrant) img_var="IMG_QDRANT" ;;
+    ollama) img_var="IMG_OLLAMA" ;;
+    llama-server|llama) img_var="IMG_LLAMA" ;;
+    litellm) img_var="IMG_LITELLM" ;;
+    open-webui|openwebui) img_var="IMG_OPENWEBUI" ;;
+    n8n) img_var="IMG_N8N" ;;
+    docling-serve|docling) img_var="IMG_DOCLING" ;;
+    searxng) img_var="IMG_SEARXNG" ;;
+    portainer) img_var="IMG_PORTAINER" ;;
+    caddy) img_var="IMG_CADDY" ;;
+    obscura) img_var="IMG_OBSCURA" ;;
+    kokoro) img_var="IMG_KOKORO" ;;
+    whisper) img_var="IMG_WHISPER" ;;
+    clickhouse) img_var="IMG_CLICKHOUSE" ;;
+    s3|rustfs) img_var="IMG_S3" ;;
+    langfuse-web) img_var="IMG_LANGFUSE_WEB" ;;
+    langfuse-worker) img_var="IMG_LANGFUSE_WORKER" ;;
+    *) echo "  Unknown service: $service"; return ;;
+  esac
+  local img_value
+  img_value=$(/usr/bin/grep "^${img_var}=" "$VERSIONS_FILE" | /usr/bin/cut -d'=' -f2)
+  if [[ -z "$img_value" ]]; then
+    echo "  $service: no version found in versions.env"
+    return
+  fi
+  echo "  $service: checking $img_value"
+  docker compose --env-file "$VERSIONS_FILE" --env-file .env pull "$service" 2>/dev/null
+  echo "  $service: updated"
+}
+if [[ $# -eq 0 ]]; then
+  usage
+  exit 1
+fi
+case "$1" in
+  versions) cmd_versions ;;
+  update) shift; cmd_update "$@" ;;
+  pull) shift; docker compose --env-file "$VERSIONS_FILE" --env-file .env pull "$@" ;;
+  ps) docker compose --env-file "$VERSIONS_FILE" --env-file .env ps "$@" ;;
+  logs) shift; if [[ -z "${1:-}" ]]; then docker compose --env-file "$VERSIONS_FILE" --env-file .env logs -f; else docker compose --env-file "$VERSIONS_FILE" --env-file .env logs -f "$@"; fi ;;
+  start) docker compose --env-file "$VERSIONS_FILE" --env-file .env up -d "$@" ;;
+  stop) docker compose --env-file "$VERSIONS_FILE" --env-file .env stop "$@" ;;
+  restart) shift; if [[ -z "${1:-}" ]]; then docker compose --env-file "$VERSIONS_FILE" --env-file .env restart; else docker compose --env-file "$VERSIONS_FILE" --env-file .env restart "$@"; fi ;;
+  down) docker compose --env-file "$VERSIONS_FILE" --env-file .env down "$@" ;;
+  exec) shift; docker compose --env-file "$VERSIONS_FILE" --env-file .env exec "$@" ;;
+  compose) shift; docker compose --env-file "$VERSIONS_FILE" --env-file .env "$@" ;;
+  help|--help|-h) usage ;;
+  *) echo "Unknown subcommand: $1"; usage; exit 1 ;;
+esac
