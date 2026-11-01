@@ -20,7 +20,7 @@ jobs:
       - name: Set up .env
         run: |
           cp .env.example .env
-          sed -i 's|^POSTGRES_PASSWORD=.*$|POSTGRES_PASSWORD=ci_test_password_123|' .env
+          bash scripts/gen-secrets.sh .env
 
       - name: Show Docker info
         run: |
