@@ -56,11 +56,14 @@ verify_prereqs() {
     fi
     ok "Docker socket joignable"
 
-    # Groupe docker
-    if ! groups | grep -q docker; then
+    # Groupe docker (exact match, pas de sous-chaîne)
+    if [ "$(id -u)" -eq 0 ]; then
+        ok "Groupe docker OK (root)"
+    elif id -nG | tr ' ' '\n' | grep -qx docker; then
+        ok "Groupe docker OK"
+    else
         warn "Vous n'êtes pas dans le groupe docker. Lancez bootstrap.sh ou : sudo usermod -aG docker $USER"
     fi
-    ok "Groupe docker OK"
 
     ok "Prérequis vérifiés"
 }
