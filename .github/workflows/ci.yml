@@ -58,7 +58,7 @@ jobs:
             caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
 
   demarrage:
-    if: github.event_name == 'push' && (starts_with(github.ref, 'refs/heads/release/') || starts_with(github.ref, 'refs/heads/lot/g1-ci')) || github.event_name == 'workflow_dispatch' || github.event_name == 'schedule'
+    if: github.event_name == 'push' && (startsWith(github.ref, 'refs/heads/release/') || startsWith(github.ref, 'refs/heads/lot/g1-ci')) || github.event_name == 'workflow_dispatch' || github.event_name == 'schedule'
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
