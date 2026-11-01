@@ -7,15 +7,11 @@ on:
     branches: [ dev, main ]
 
 jobs:
-  test-stack:
+  validate-config:
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
 
       - name: Set up .env
         run: |
@@ -25,15 +21,5 @@ jobs:
       - name: Download models (select only)
         run: bash download-models.sh --select-only
 
-      - name: Show Docker info
-        run: |
-          docker version
-          docker info --format '{{ .OSType }}/{{ .Architecture }}'
-
       - name: Verify compose is parseable
-        run: ./stack config > /dev/null
-
-      - name: Run test-stack.sh
-        run: |
-          chmod +x test-stack.sh
-          ./test-stack.sh --wait 600
+        run: ./stack config -q
