@@ -176,7 +176,6 @@ download_file() {
     else
         local code=$?
         warn "Échec du téléchargement de $label (code $code)"
-        rm -f "$part"
         return $code
     fi
 }
