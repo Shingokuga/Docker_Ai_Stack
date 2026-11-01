@@ -20,7 +20,10 @@ jobs:
       - name: Set up .env
         run: |
           cp .env.example .env
-          bash scripts/gen-secrets.sh .env
+          bash scripts/gen-secrets.sh
+
+      - name: Download models (select only)
+        run: bash download-models.sh --select-only
 
       - name: Show Docker info
         run: |
