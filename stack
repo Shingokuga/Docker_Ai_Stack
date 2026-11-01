@@ -140,6 +140,7 @@ case "$1" in
   down) docker compose --env-file "$VERSIONS_FILE" --env-file .env down "$@" ;;
   exec) shift; docker compose --env-file "$VERSIONS_FILE" --env-file .env exec "$@" ;;
   compose) shift; docker compose --env-file "$VERSIONS_FILE" --env-file .env "$@" ;;
+  config) shift; docker compose --env-file "$VERSIONS_FILE" --env-file .env config "$@" ;;
   help|--help|-h) usage ;;
   *) echo "Unknown subcommand: $1"; usage; exit 1 ;;
 esac

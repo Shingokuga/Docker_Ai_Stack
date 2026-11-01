@@ -158,6 +158,15 @@ Pass-through to docker compose for advanced operations.
 ./stack compose up -d --no-deps redis
 ```
 
+### `./stack config [args...]`
+
+Validate compose configuration (CI uses `./stack config -q`).
+
+```bash
+./stack config
+./stack config -q  # quiet mode
+```
+
 ## Service Names
 
 Use these service names with commands like `update`, `logs`, `exec`, `restart`:
