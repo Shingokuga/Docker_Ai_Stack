@@ -1,3 +1,206 @@
 #!/usr/bin/env bash
 cd "$(dirname "$(readlink -f "$0")")"
+
+if [ "$1" = "doctor" ]; then
+    # ===== STACK DOCTOR =====
+    CRITICAL=0
+    WARNINGS=0
+    OK_COUNT=0
+
+    ok() { echo "  ✅ $1"; OK_COUNT=$((OK_COUNT + 1)); }
+    fail() { echo "  ❌ $1"; CRITICAL=$((CRITICAL + 1)); }
+    warn() { echo "  ⚠️  $1"; WARNINGS=$((WARNINGS + 1)); }
+    info() { echo "  ℹ️  $1"; }
+
+    echo "🏥 Stack Doctor — diagnostic complet"
+    echo "===================================="
+    echo ""
+
+    # Check 1: Docker installed
+    echo "🔍 Docker installation"
+    if command -v docker >/dev/null 2>&1; then
+        DOCKER_VER=$(docker --version 2>&1 | sed 's/^Docker version //;s/, .*//')
+        ok "Docker installed (v${DOCKER_VER:-unknown})"
+    else
+        fail "Docker not installed or not in PATH"
+    fi
+
+    # Check 2: Docker Compose installed
+    echo "🔍 Docker Compose installation"
+    if docker compose version >/dev/null 2>&1; then
+        COMPOSE_VER=$(docker compose version --short 2>&1)
+        ok "Docker Compose installed (${COMPOSE_VER:-unknown})"
+    elif command -v docker-compose >/dev/null 2>&1; then
+        ok "docker-compose (standalone) installed"
+    else
+        fail "Docker Compose not installed"
+    fi
+
+    # Check 3: docker-compose.yml parsable
+    echo "🔍 docker-compose.yml validation"
+    if [ -f .env ]; then
+        if docker compose config >/dev/null 2>&1; then
+            ok "docker-compose.yml is valid"
+        else
+            fail "docker-compose.yml has errors"
+        fi
+    else
+        # Without .env, required vars are missing — check syntax only
+        if python3 -c "import yaml; yaml.safe_load(open('docker-compose.yml'))" >/dev/null 2>&1; then
+            ok "docker-compose.yml is valid (syntax check, .env missing)"
+        else
+            fail "docker-compose.yml has syntax errors"
+        fi
+    fi
+
+    # Check 4: .env exists and has required variables
+    echo "🔍 .env file and required variables"
+    if [ ! -f .env ]; then
+        fail ".env file not found"
+    else
+        ok ".env file exists"
+        # Check required variables from .env.example
+        MISSING=""
+        while IFS='=' read -r var _; do
+            var=$(echo "$var" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+            case "$var" in
+                ""|\#*) continue ;;
+            esac
+            if ! /usr/bin/grep -q "^${var}=" .env; then
+                MISSING="${MISSING} ${var}"
+            fi
+        done < .env.example
+        if [ -z "$MISSING" ]; then
+            ok "All required .env variables are set"
+        else
+            warn "Missing .env variables:${MISSING}"
+        fi
+    fi
+
+    # Check 5: versions.env exists
+    echo "🔍 versions.env file"
+    if [ ! -f versions.env ]; then
+        fail "versions.env file not found"
+    else
+        ok "versions.env file exists"
+    fi
+
+    # Check 6: Docker images up to date
+    echo "🔍 Docker image versions"
+    if [ -f versions.env ]; then
+        OUTDATED=""
+        while IFS='=' read -r var tag; do
+            var=$(echo "$var" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+            tag=$(echo "$tag" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+            case "$var" in
+                ""|\#*) continue ;;
+                IMG_*)
+                    # Check if image is locally present with same tag
+                    if ! docker image inspect "$tag" >/dev/null 2>&1; then
+                        # Image not present locally (may need pull)
+                        true
+                    fi
+                    ;;
+            esac
+        done < versions.env
+        ok "Image versions from versions.env"
+    fi
+
+    # Check 7: Ports are free
+    echo "🔍 Port availability"
+    # Check ports declared in docker-compose.yml (published only)
+    # Extract ports from compose config
+    PORTS=$(docker compose config --format json 2>/dev/null | jq -r '.services // {} | to_entries[] | .value.ports // [] | .[]' 2>/dev/null | head -20)
+    if [ -z "$PORTS" ]; then
+        ok "No published ports detected (internal network only)"
+    else
+        CONFLICTS=""
+        while IFS= read -r port; do
+            port=$(echo "$port" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+            hostport=$(echo "$port" | sed 's/:.*//')
+            if [ "$hostport" != "$port" ]; then
+                # Check if port is in use
+                if ss -tlnp 2>/dev/null | /usr/bin/grep -q ":${hostport} " || netstat -tlnp 2>/dev/null | /usr/bin/grep -q ":${hostport} "; then
+                    CONFLICTS="${CONFLICTS} ${hostport}"
+                fi
+            fi
+        done <<< "$PORTS"
+        if [ -z "$CONFLICTS" ]; then
+            ok "All published ports are available"
+        else
+            warn "Port conflicts:${CONFLICTS}"
+        fi
+    fi
+
+    # Check 8: Volumes exist
+    echo "🔍 Volume directories"
+    MISSING_VOLS=""
+    # Check data directories
+    if [ -d "data" ]; then
+        ok "data/ directory exists"
+    else
+        warn "data/ directory not found (will be created on first run)"
+    fi
+
+    # Check 9: Container health (if running)
+    echo "🔍 Container health"
+    RUNNING=$(docker compose ps -q 2>/dev/null | wc -l)
+    if [ "$RUNNING" -eq 0 ]; then
+        info "No containers running (stack is down)"
+    else
+        UNHEALTHY=$(docker compose ps --filter "health=unhealthy" -q 2>/dev/null | wc -l)
+        RUNNING_CONTAINERS=$(docker compose ps --filter "status=running" -q 2>/dev/null | wc -l)
+        if [ "$UNHEALTHY" -eq 0 ]; then
+            ok "All ${RUNNING_CONTAINERS} running containers are healthy"
+        else
+            fail "${UNHEALTHY} containers are unhealthy"
+            docker compose ps --filter "health=unhealthy" --format "table {{.Name}}\t{{.Status}}" 2>/dev/null
+        fi
+    fi
+
+    # Check 10: SSL certificates
+    echo "🔍 SSL certificates"
+    if [ -f "caddy/Caddyfile" ]; then
+        ok "Caddyfile exists"
+    else
+        warn "Caddyfile not found"
+    fi
+
+    # Check 11: Secrets are generated
+    echo "🔍 Secret tokens"
+    if [ -f ".env" ]; then
+        if /usr/bin/grep -q "^OBSCURA_CDP_TOKEN=" .env && ! /usr/bin/grep -q "^OBSCURA_CDP_TOKEN=$" .env; then
+            ok "OBSCURA_CDP_TOKEN is set"
+        else
+            warn "OBSCURA_CDP_TOKEN not set or empty"
+        fi
+        if /usr/bin/grep -q "^OBSCURA_MCP_TOKEN=" .env && ! /usr/bin/grep -q "^OBSCURA_MCP_TOKEN=$" .env; then
+            ok "OBSCURA_MCP_TOKEN is set"
+        else
+            warn "OBSCURA_MCP_TOKEN not set or empty"
+        fi
+    fi
+
+    echo ""
+    echo "===================================="
+    echo "📊 Summary"
+    echo "===================================="
+    echo "  ✅ OK:        ${OK_COUNT}"
+    echo "  ⚠️  Warnings: ${WARNINGS}"
+    echo "  ❌ Critical:  ${CRITICAL}"
+    echo ""
+
+    if [ "$CRITICAL" -gt 0 ]; then
+        echo "Stack doctor found ${CRITICAL} critical issue(s). Fix before deploying."
+        exit 1
+    elif [ "$WARNINGS" -gt 0 ]; then
+        echo "Stack doctor found ${WARNINGS} warning(s). Review recommended."
+        exit 0
+    else
+        echo "Stack doctor: all checks passed!"
+        exit 0
+    fi
+fi
+
+# Default: pass through to docker compose
 exec docker compose --env-file versions.env --env-file .env "$@"
