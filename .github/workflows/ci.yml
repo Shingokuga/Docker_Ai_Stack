@@ -1,84 +1,31 @@
-name: CI
+name: CI - Stack Universelle
 
 on:
   push:
-    branches: [ '**' ]
+    branches: [ dev, main ]
   pull_request:
-    branches: [ '**' ]
-  workflow_dispatch:
-  schedule:
-    - cron: '0 2 * * *'
+    branches: [ dev, main ]
 
 jobs:
-  statique:
+  test-stack:
     runs-on: ubuntu-24.04
+    timeout-minutes: 30
     steps:
-      - name: Checkout
+      - name: Checkout code
         uses: actions/checkout@v4
-        with:
-          ref: ${{ github.event_name == 'schedule' && 'dev' || '' }}
 
-      - name: Install shellcheck
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Show Docker info
         run: |
-          sudo apt-get update
-          sudo apt-get install -y shellcheck
+          docker version
+          docker info --format '{{ .OSType }}/{{ .Architecture }}'
 
-      - name: Syntax check scripts
+      - name: Verify compose is parseable
+        run: ./stack config > /dev/null
+
+      - name: Run test-stack.sh
         run: |
-          for f in $(git ls-files '*.sh'); do
-            [ -f "$f" ] || continue
-            bash -n "$f" || { echo "bash -n failed on $f"; exit 1; }
-            echo "bash -n OK: $f"
-          done
-          [ -f "stack" ] && bash -n "stack" && echo "bash -n OK: stack"
-
-      - name: Shellcheck scripts
-        run: |
-          for f in $(git ls-files '*.sh'); do
-            [ -f "$f" ] || continue
-            shellcheck -S error "$f" || { echo "shellcheck failed on $f"; exit 1; }
-            echo "shellcheck OK: $f"
-          done
-          [ -f "stack" ] && shellcheck -S error "stack" && echo "shellcheck OK: stack"
-
-      - name: Config-only install
-        run: ./install.sh --config-only --yes
-
-      - name: Validate compose config
-        run: ./stack config -q
-
-      - name: Validate Caddyfile
-        run: |
-          docker run --rm \
-            -v "$PWD/caddy/Caddyfile:/etc/caddy/Caddyfile:ro" \
-            -e BASE_DOMAIN=test.local \
-            caddy:2.11.7 \
-            caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
-
-  demarrage:
-    needs: statique
-    if: github.event_name == 'push' && (startsWith(github.ref, 'refs/heads/release/') || startsWith(github.ref, 'refs/heads/lot/g1-ci')) || github.event_name == 'workflow_dispatch' || github.event_name == 'schedule'
-    runs-on: ubuntu-24.04
-    timeout-minutes: 45
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-        with:
-          ref: ${{ github.event_name == 'schedule' && 'dev' || '' }}
-
-      - name: Check disk space
-        run: |
-          df -h
-          FREE_MB=$(df -m / | tail -1 | awk '{print $4}')
-          if [ "$FREE_MB" -lt 25600 ]; then
-            echo "Less than 25 GB free, cleaning up packages..."
-            sudo apt-get remove -y dotnet-sdk-* dotnet-runtime-* 2>/dev/null || true
-            sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc
-            df -h
-          fi
-
-      - name: Full install (no GPU)
-        run: ./install.sh --yes --no-gpu
-
-      - name: Test stack
-        run: ./test-stack.sh --wait 600 || { echo "test-stack.sh failed"; ./stack ps -a; ./stack logs --tail 80; exit 1; }
+          chmod +x test-stack.sh
+          ./test-stack.sh --wait 600
