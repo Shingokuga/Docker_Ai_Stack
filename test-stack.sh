@@ -1,12 +1,14 @@
 #!/usr/bin/env bash
 # test-stack.sh — Test de santé de tous les services de la stack
 # Vérifie la parsabilité du compose, l'état réel des conteneurs et les points d'accès HTTP.
+# Attend automatiquement que tous les conteneurs soient healthy (timeout configurable).
+# Les ports sont lus depuis .env/versions.env et testés dynamiquement.
 set -euo pipefail
 
 cd "$(dirname "$0")"
 
 # Parse arguments
-WAIT_SECONDS=0
+WAIT_SECONDS=600  # Default timeout for waiting on healthy containers
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --wait)
@@ -23,19 +25,23 @@ done
 get_env() {
     local key="$1"
     local default="$2"
-    if [ -f .env ]; then
-        local val
-        val=$(/usr/bin/grep -m1 "^${key}=" .env | cut -d'=' -f2-)
-        if [ -n "$val" ]; then
-            echo "$val"
-            return 0
+    # Check .env first, then versions.env
+    for envfile in .env versions.env; do
+        if [ -f "$envfile" ]; then
+            local val
+            val=$(/usr/bin/grep -m1 "^${key}=" "$envfile" | cut -d'=' -f2-)
+            if [ -n "$val" ]; then
+                echo "$val"
+                return 0
+            fi
         fi
-    fi
+    done
     echo "$default"
 }
 
 NO_GPU=$(get_env NO_GPU "0")
 BASE_DOMAIN=$(get_env BASE_DOMAIN "local")
+HTTP_PORT=$(get_env HTTP_PORT "80")
 HTTPS_PORT=$(get_env HTTPS_PORT "443")
 
 info() { echo "ℹ  $*"; }
@@ -55,18 +61,20 @@ else
     ok "Configuration compose valide"
 fi
 
-# 2. Vérification de l'état réel des conteneurs
-info "État des conteneurs (./stack ps -a)..."
-PS_JSON=$(./stack ps -a --format json 2>/dev/null || echo "")
-
-# Parser la sortie JSON lignes par lignes (un objet JSON par ligne, pas un tableau)
+# Fonction pour extraire les conteneurs et leur état depuis ./stack ps -a
 parse_containers() {
+    local ps_json
+    ps_json=$("./stack" ps -a --format json 2>/dev/null || echo "")
+
+    if [ -z "$ps_json" ]; then
+        echo ""
+        return
+    fi
+
     if command -v jq >/dev/null 2>&1; then
-        echo "$PS_JSON" | jq -r '
-            [.Service, .Name, .State, .Health, (.ExitCode // 0)] | join("\t")
-        '
+        echo "$ps_json" | jq -r '[.Service, .Name, .State, .Health, (.ExitCode // 0)] | join("\t")'
     else
-        echo "$PS_JSON" | python3 -c "
+        echo "$ps_json" | python3 -c "
 import sys, json
 for line in sys.stdin:
     line = line.strip()
@@ -86,45 +94,72 @@ for line in sys.stdin:
     fi
 }
 
-CONTAINER_DATA=$(parse_containers)
+# 2. Attendre que tous les conteneurs soient stables (healthy)
+info "Attente stabilisation conteneurs (max ${WAIT_SECONDS}s)..."
+ELAPSED=0
+PS_JSON=""
+CONTAINER_DATA=""
 
-# Wait for containers to stabilize if --wait specified
-if [ "$WAIT_SECONDS" -gt 0 ]; then
-    info "Attente stabilisation conteneurs (max ${WAIT_SECONDS}s)..."
-    ELAPSED=0
-    while [ "$ELAPSED" -lt "$WAIT_SECONDS" ]; do
-        PS_JSON=$(./stack ps -a --format json 2>/dev/null || echo "")
-        CONTAINER_DATA=$(parse_containers)
+while [ "$ELAPSED" -lt "$WAIT_SECONDS" ]; do
+    PS_JSON=$(./stack ps -a --format json 2>/dev/null || echo "")
+    CONTAINER_DATA=$(parse_containers)
 
-        UNSTABLE=0
-        UNSTABLE_NAMES=""
-        while IFS=$'\t' read -r service name state health exit_code; do
-            state_lower=$(echo "$state" | tr '[:upper:]' '[:lower:]')
-            health_lower=$(echo "$health" | tr '[:upper:]' '[:lower:]')
-            if [ "$state_lower" = "starting" ] || [ "$state_lower" = "restarting" ] || [ "$health_lower" = "unhealthy" ]; then
-                UNSTABLE=$((UNSTABLE + 1))
-                UNSTABLE_NAMES="${UNSTABLE_NAMES} ${name}"
-            fi
-        done <<< "$CONTAINER_DATA"
+    UNSTABLE=0
+    UNSTABLE_NAMES=""
 
-        if [ "$UNSTABLE" -eq 0 ]; then
-            ok "Tous les conteneurs sont stables (${ELAPSED}s)"
-            break
+    while IFS=$'\t' read -r service name state health exit_code; do
+        # Skip empty lines
+        [ -z "$service" ] && continue
+
+        state_lower=$(echo "$state" | tr '[:upper:]' '[:lower:]')
+        health_lower=$(echo "$health" | tr '[:upper:]' '[:lower:]')
+
+        # Containers that exited successfully are OK
+        if [ "$state_lower" = "exited" ] && [ "$exit_code" = "0" ]; then
+            continue
         fi
-        sleep 10
-        ELAPSED=$((ELAPSED + 10))
-    done
 
-    if [ "$ELAPSED" -ge "$WAIT_SECONDS" ]; then
-        info "Timeout atteinte. Conteneurs non stables:${UNSTABLE_NAMES}"
-        PS_JSON=$(./stack ps -a --format json 2>/dev/null || echo "")
-        CONTAINER_DATA=$(parse_containers)
+        # Containers that are starting/restarting are unstable
+        if [ "$state_lower" = "starting" ] || [ "$state_lower" = "restarting" ]; then
+            UNSTABLE=$((UNSTABLE + 1))
+            UNSTABLE_NAMES="${UNSTABLE_NAMES} ${name}"
+        fi
+
+        # Containers that are healthy are OK
+        if [ "$health_lower" = "healthy" ]; then
+            continue
+        fi
+
+        # Containers that are unhealthy are unstable
+        if [ "$health_lower" = "unhealthy" ]; then
+            UNSTABLE=$((UNSTABLE + 1))
+            UNSTABLE_NAMES="${UNSTABLE_NAMES} ${name}"
+        fi
+    done <<< "$CONTAINER_DATA"
+
+    if [ "$UNSTABLE" -eq 0 ]; then
+        ok "Tous les conteneurs sont stables (${ELAPSED}s)"
+        break
     fi
+
+    info "Conteneurs instables:${UNSTABLE_NAMES} (${ELAPSED}s/${WAIT_SECONDS}s)"
+    sleep 10
+    ELAPSED=$((ELAPSED + 10))
+done
+
+if [ "$ELAPSED" -ge "$WAIT_SECONDS" ]; then
+    info "Timeout atteinte (${WAIT_SECONDS}s). État actuel des conteneurs instables:${UNSTABLE_NAMES}"
+    # Continue with whatever state we have
+    PS_JSON=$(./stack ps -a --format json 2>/dev/null || echo "")
+    CONTAINER_DATA=$(parse_containers)
 fi
 
 # Analyser l'état des conteneurs
 if [ -n "$CONTAINER_DATA" ]; then
     while IFS=$'\t' read -r service name state health exit_code; do
+        # Skip empty lines
+        [ -z "$service" ] && continue
+
         state_lower=$(echo "$state" | tr '[:upper:]' '[:lower:]')
         health_lower=$(echo "$health" | tr '[:upper:]' '[:lower:]')
 
@@ -176,7 +211,7 @@ fi
 
 # 3. Vérification des points d'accès HTTP pour les services critiques
 # Sites lus depuis le Caddyfile (noms de domaine <nom>.{$BASE_DOMAIN})
-info "Vérification des points d'accès HTTP..."
+info "Vérification des points d'accès HTTP (ports ${HTTP_PORT}/${HTTPS_PORT})..."
 
 # Extract site names from Caddyfile (only those ending with .{$BASE_DOMAIN})
 SITE_NAMES=$(/usr/bin/grep -oP '^[a-z][a-z0-9-]*\.\{\$BASE_DOMAIN\}' caddy/Caddyfile 2>/dev/null | sed 's/\.{$BASE_DOMAIN}//' | sort -u)
@@ -189,7 +224,7 @@ if command -v curl >/dev/null 2>&1; then
 
         local http_code
         http_code=$(curl -sk -L --max-time "$timeout" \
-            --resolve "${name}.${BASE_DOMAIN}:443:127.0.0.1" \
+            --resolve "${name}.${BASE_DOMAIN}:${HTTPS_PORT}:127.0.0.1" \
             -o /dev/null -w "%{http_code}" \
             "https://${name}.${BASE_DOMAIN}/" 2>/dev/null) || http_code="000"
 
@@ -209,7 +244,7 @@ if command -v curl >/dev/null 2>&1; then
 
         local http_code
         http_code=$(curl -s --max-time "$timeout" \
-            --resolve "${name}.${BASE_DOMAIN}:80:127.0.0.1" \
+            --resolve "${name}.${BASE_DOMAIN}:${HTTP_PORT}:127.0.0.1" \
             -o /dev/null -w "%{http_code}" \
             "http://${name}.${BASE_DOMAIN}/root.crt" 2>/dev/null) || http_code="000"
 
