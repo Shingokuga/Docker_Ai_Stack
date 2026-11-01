@@ -5,6 +5,20 @@ set -euo pipefail
 
 cd "$(dirname "$0")"
 
+# Parse arguments
+WAIT_SECONDS=0
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --wait)
+            WAIT_SECONDS="$2"
+            shift 2
+            ;;
+        *)
+            shift
+            ;;
+    esac
+done
+
 # Lecture clé par clé depuis .env (pas de source pour éviter les caractères spéciaux)
 get_env() {
     local key="$1"
@@ -22,7 +36,6 @@ get_env() {
 
 NO_GPU=$(get_env NO_GPU "0")
 BASE_DOMAIN=$(get_env BASE_DOMAIN "local")
-HTTP_PORT=$(get_env HTTP_PORT "80")
 HTTPS_PORT=$(get_env HTTPS_PORT "443")
 
 info() { echo "ℹ  $*"; }
@@ -33,7 +46,6 @@ PASS=0
 FAIL=0
 TOTAL=0
 
-# Vérifier que les conteneurs sont up
 # 1. Vérification que le compose est parsable et ne contient pas d'erreurs de configuration
 info "Vérification de la configuration compose (./stack config)..."
 if ! ./stack config > /dev/null 2>&1; then
@@ -48,7 +60,6 @@ info "État des conteneurs (./stack ps -a)..."
 PS_JSON=$(./stack ps -a --format json 2>/dev/null || echo "")
 
 # Parser la sortie JSON lignes par lignes (un objet JSON par ligne, pas un tableau)
-# Utiliser jq si présent, sinon python3 ligne par ligne
 parse_containers() {
     if command -v jq >/dev/null 2>&1; then
         echo "$PS_JSON" | jq -r '
@@ -76,6 +87,40 @@ for line in sys.stdin:
 }
 
 CONTAINER_DATA=$(parse_containers)
+
+# Wait for containers to stabilize if --wait specified
+if [ "$WAIT_SECONDS" -gt 0 ]; then
+    info "Attente stabilisation conteneurs (max ${WAIT_SECONDS}s)..."
+    ELAPSED=0
+    while [ "$ELAPSED" -lt "$WAIT_SECONDS" ]; do
+        PS_JSON=$(./stack ps -a --format json 2>/dev/null || echo "")
+        CONTAINER_DATA=$(parse_containers)
+
+        UNSTABLE=0
+        UNSTABLE_NAMES=""
+        while IFS=$'\t' read -r service name state health exit_code; do
+            state_lower=$(echo "$state" | tr '[:upper:]' '[:lower:]')
+            health_lower=$(echo "$health" | tr '[:upper:]' '[:lower:]')
+            if [ "$state_lower" = "starting" ] || [ "$state_lower" = "restarting" ] || [ "$health_lower" = "unhealthy" ]; then
+                UNSTABLE=$((UNSTABLE + 1))
+                UNSTABLE_NAMES="${UNSTABLE_NAMES} ${name}"
+            fi
+        done <<< "$CONTAINER_DATA"
+
+        if [ "$UNSTABLE" -eq 0 ]; then
+            ok "Tous les conteneurs sont stables (${ELAPSED}s)"
+            break
+        fi
+        sleep 10
+        ELAPSED=$((ELAPSED + 10))
+    done
+
+    if [ "$ELAPSED" -ge "$WAIT_SECONDS" ]; then
+        info "Timeout atteinte. Conteneurs non stables:${UNSTABLE_NAMES}"
+        PS_JSON=$(./stack ps -a --format json 2>/dev/null || echo "")
+        CONTAINER_DATA=$(parse_containers)
+    fi
+fi
 
 # Analyser l'état des conteneurs
 if [ -n "$CONTAINER_DATA" ]; then
@@ -130,25 +175,75 @@ else
 fi
 
 # 3. Vérification des points d'accès HTTP pour les services critiques
+# Sites lus depuis le Caddyfile (noms de domaine <nom>.{$BASE_DOMAIN})
 info "Vérification des points d'accès HTTP..."
+
+# Extract site names from Caddyfile (only those ending with .{$BASE_DOMAIN})
+SITE_NAMES=$(/usr/bin/grep -oP '^[a-z][a-z0-9-]*\.\{\$BASE_DOMAIN\}' caddy/Caddyfile 2>/dev/null | sed 's/\.{$BASE_DOMAIN}//' | sort -u)
+
 if command -v curl >/dev/null 2>&1; then
     check_http() {
         local name="$1"
-        local timeout=5
+        local timeout=10
         TOTAL=$((TOTAL + 1))
-        if curl -sS --max-time "$timeout" --resolve "${name}.local:80:127.0.0.1" "http://${name}.local" -o /dev/null 2>&1; then
-            ok "HTTP $name : accessible"
+
+        local http_code
+        http_code=$(curl -sk -L --max-time "$timeout" \
+            --resolve "${name}.${BASE_DOMAIN}:443:127.0.0.1" \
+            -o /dev/null -w "%{http_code}" \
+            "https://${name}.${BASE_DOMAIN}/" 2>/dev/null) || http_code="000"
+
+        if [ "$http_code" -ge 200 ] && [ "$http_code" -lt 400 ]; then
+            ok "HTTP $name : code $http_code"
             PASS=$((PASS + 1))
         else
-            fail "HTTP $name : inaccessible"
+            fail "HTTP $name : code $http_code"
             FAIL=$((FAIL + 1))
         fi
     }
 
-    check_http "webui"
-    check_http "langfuse"
-    check_http "documents"
-    check_http "images"
+    check_certificat() {
+        local name="certificat"
+        local timeout=10
+        TOTAL=$((TOTAL + 1))
+
+        local http_code
+        http_code=$(curl -s --max-time "$timeout" \
+            --resolve "${name}.${BASE_DOMAIN}:80:127.0.0.1" \
+            -o /dev/null -w "%{http_code}" \
+            "http://${name}.${BASE_DOMAIN}/root.crt" 2>/dev/null) || http_code="000"
+
+        if [ "$http_code" = "200" ]; then
+            ok "Certificat /root.crt : code $http_code"
+            PASS=$((PASS + 1))
+        else
+            fail "Certificat /root.crt : code $http_code"
+            FAIL=$((FAIL + 1))
+        fi
+    }
+
+    # Test each site defined in Caddyfile
+    for site_name in $SITE_NAMES; do
+        # Skip documents/images if their backend services aren't running
+        if [ "$site_name" = "documents" ]; then
+            has_service=$(/usr/bin/grep -c "^docling-serve	" <<< "$CONTAINER_DATA" || true)
+            if [ "$has_service" -eq 0 ]; then
+                info "HTTP documents : ignoré (docling-serve non démarré)"
+                continue
+            fi
+        fi
+        if [ "$site_name" = "images" ]; then
+            has_service=$(/usr/bin/grep -c "^comfyui	" <<< "$CONTAINER_DATA" || true)
+            if [ "$has_service" -eq 0 ]; then
+                info "HTTP images : ignoré (comfyui non démarré)"
+                continue
+            fi
+        fi
+        check_http "$site_name"
+    done
+
+    # Test certificate endpoint separately (http://certificat.local)
+    check_certificat
 fi
 
 echo ""

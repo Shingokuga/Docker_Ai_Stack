@@ -76,7 +76,8 @@ stockage.{$BASE_DOMAIN} {
         X-Content-Type-Options nosniff
         Referrer-Policy no-referrer
     }
-    redir @root http://rustfs.stack.local/ui 302
+    @root path /
+    redir @root /rustfs/console/ 302
     reverse_proxy s3:9001
 }
 
