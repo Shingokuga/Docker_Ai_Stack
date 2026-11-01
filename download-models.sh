@@ -59,8 +59,63 @@ with open('.env', 'w') as f:
 }
 
 # -------------------------------------------------------
-# Téléchargement avec reprise et vérification
+# Téléchargement avec reprise et vérification SHA-256
 # -------------------------------------------------------
+
+# Table des sommes SHA-256 attendues (nom de fichier → hash)
+# Sources : lfs.oid de l'API Hugging Face, vérifiées contre les copies locales
+# /home/shingokuga/Montage_docker_stack/data/llama-cpp/models/ et
+# /home/shingokuga/Montage_docker_stack/data/comfyui/models/{diffusion_models,text_encoders,vae}/
+declare -A EXPECTED_HASHES
+EXPECTED_HASHES["Qwen3.8-27B-TurboFCFusion-735-882-Here-Uncen-NEO-CODER-MAX-MTP-Q4_K_M.gguf"]="bc7a6cf2bcc78d1190aaf04d1ab1c5cb845b6ff23aa0e7d24fe0d2ea6d3a7c7c"
+EXPECTED_HASHES["mmproj-qwen38-27b-F16.gguf"]="82e620db8cb83267e9775e5aad3e8d8aa5af7ace825e94c52d3d730eb35af88a"
+EXPECTED_HASHES["Qwen3.5-9B-The-Defiant-Fable-Uncnr-Heretic-NEO-MAX-MTP-Q4_K_M.gguf"]=""
+EXPECTED_HASHES["mmproj-qwen35-9b-F16.gguf"]="f70dc3509053962b0d0d3ee8a7eacebf5d60aa560cad78254ae8698516ae029f"
+EXPECTED_HASHES["qwen-image-2.1-UC-NVFP4.safetensors"]="7cdf87660e84aecf740b5b0f65c848549ba8a74d88ac201976931ca4c780d121"
+EXPECTED_HASHES["qwen3vl_8b_bf16.safetensors"]="68bdc82bc1b66851162ae656225e7e2068166b603db19bd5d5a3b90eb12669a9"
+EXPECTED_HASHES["qwen3.5_9b_qwen_image_2.1_pe_t2i.int8_convrot.safetensors"]="9182abae56fe05459840a86d22abd21f972061c92fce032630af680c8c5178d3"
+EXPECTED_HASHES["qwen3.5_9b_qwen_image_2.1_pe_i2i.int8_convrot.safetensors"]="32707d01b427e488af252b95c551989aad59f9fec611a694f5db6bde7f0f1f6c"
+EXPECTED_HASHES["qwen_image_2.1_vae_bf16.safetensors"]="bb21f7473051e1ac368515dd3f2e15cd44d7a11748ee8823e1ddca3e4876b7c9"
+
+# Vérifie l'intégrité SHA-256 d'un fichier. Retourne 0 si OK, 1 sinon.
+# Écrit un fichier <nom>.sha256 pour éviter de recalculer à chaque relance.
+verify_file_hash() {
+    local dest="$1"
+    local basename
+    basename=$(basename "$dest")
+    local expected="${EXPECTED_HASHES[$basename]}"
+    local sha_file="${dest}.sha256"
+
+    # Si pas de somme attendue, rien à vérifier
+    if [ -z "$expected" ]; then
+        return 0
+    fi
+
+    # Si le fichier .sha256 existe déjà et correspond, pas besoin de recalculer
+    if [ -f "$sha_file" ]; then
+        local recorded
+        recorded=$(cat "$sha_file")
+        if [ "$recorded" = "$expected" ]; then
+            return 0
+        fi
+        # .sha256 présent mais différent → le fichier a probablement changé, recalculer
+    fi
+
+    # Calculer la somme
+    local actual
+    actual=$(sha256sum "$dest" | /usr/bin/cut -d' ' -f1)
+
+    if [ "$actual" = "$expected" ]; then
+        echo "$expected" > "$sha_file"
+        return 0
+    else
+        warn "Écart SHA-256 pour $basename :"
+        warn "  attendu : $expected"
+        warn "  obtenu  : $actual"
+        return 1
+    fi
+}
+
 download_file() {
     local url="$1" dest="$2" label="$3"
     local dirname
@@ -69,6 +124,15 @@ download_file() {
 
     if [ -f "$dest" ]; then
         info "Déjà téléchargé: $label ($dest)"
+        # Vérifier l'intégrité quand même
+        if ! verify_file_hash "$dest"; then
+            warn "$label est corrompu. Le fichier va être supprimé et retéléchargé."
+            rm -f "$dest"
+            rm -f "${dest}.part"
+            # Continue to re-download
+        else
+            return 0
+        fi
         return 0
     fi
 
@@ -85,8 +149,14 @@ download_file() {
 
     if curl $curl_flags -o "$part" "$url"; then
         mv "$part" "$dest"
-        ok "$label"
-        return 0
+        # Vérifier l'intégrité après téléchargement
+        if verify_file_hash "$dest"; then
+            ok "$label"
+            return 0
+        else
+            warn "$label a été téléchargé mais est corrompu."
+            return 1
+        fi
     else
         local code=$?
         warn "Échec du téléchargement de $label (code $code)"
