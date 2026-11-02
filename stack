@@ -3,6 +3,9 @@ cd "$(dirname "$(readlink -f "$0")")"
 
 if [ "$1" = "doctor" ]; then
     # ===== STACK DOCTOR =====
+    # Diagnostic en lecture seule : ce bloc ne modifie ni les conteneurs, ni les images,
+    # ni les fichiers du dépôt. Tous les appels compose passent par compose_cmd, avec les
+    # mêmes fichiers d'environnement que le passe-plat de la dernière ligne du script.
     CRITICAL=0
     WARNINGS=0
     OK_COUNT=0
@@ -12,13 +15,129 @@ if [ "$1" = "doctor" ]; then
     warn() { echo "  ⚠️  $1"; WARNINGS=$((WARNINGS + 1)); }
     info() { echo "  ℹ️  $1"; }
 
+    compose_cmd() { docker compose --env-file versions.env --env-file .env "$@"; }
+
+    # Première ligne utile d'un message d'erreur (les lignes WARN sont ignorées).
+    first_error_line() {
+        local line
+        line=$(printf '%s\n' "$1" | sed -n '/^[[:space:]]*WARN/d;/level=warn/d;/^[[:space:]]*$/d;p;q')
+        [ -n "$line" ] || line=$(printf '%s\n' "$1" | sed -n '1p')
+        printf '%s' "$line"
+    }
+
+    # Outil de lecture JSON : jq, à défaut python3.
+    JSON_TOOL=""
+    if command -v jq >/dev/null 2>&1; then
+        JSON_TOOL="jq"
+    elif command -v python3 >/dev/null 2>&1; then
+        JSON_TOOL="python3"
+    fi
+
+    # Config compose (JSON sur stdin) -> lignes "I|service|image" et "U|service|protocole|port publié".
+    json_config_rows() {
+        if [ "$JSON_TOOL" = "jq" ]; then
+            jq -r '
+                .services
+                | if type == "object" then . else error("services") end
+                | to_entries[]
+                | .key as $s
+                | .value as $v
+                | (if ($v.image // "") != "" then "I|\($s)|\($v.image)" else empty end),
+                  (($v.ports // [])[]
+                   | select(type == "object" and ((.published // "") | tostring) != "")
+                   | "U|\($s)|\(.protocol // "tcp")|\(.published)")
+            '
+        elif [ "$JSON_TOOL" = "python3" ]; then
+            python3 -c '
+import json, sys
+data = json.load(sys.stdin)
+services = data["services"]
+if not isinstance(services, dict):
+    raise SystemExit(1)
+for name, svc in services.items():
+    if not isinstance(svc, dict):
+        continue
+    image = svc.get("image") or ""
+    if image:
+        print("I|%s|%s" % (name, image))
+    for port in svc.get("ports") or []:
+        if isinstance(port, dict) and str(port.get("published") or "") != "":
+            print("U|%s|%s|%s" % (name, port.get("protocol") or "tcp", port["published"]))
+'
+        else
+            return 1
+        fi
+    }
+
+    # Sortie de ps --format json (JSON ligne à ligne ou tableau, sur stdin)
+    # -> lignes "C|service|état|santé|image" et "P|protocole|port publié" (conteneurs running).
+    json_ps_rows() {
+        if [ "$JSON_TOOL" = "jq" ]; then
+            jq -r -s '
+                flatten
+                | .[]
+                | select(type == "object")
+                | "C|\(.Service // "")|\(.State // "")|\(.Health // "")|\(.Image // "")",
+                  (if (.State // "") == "running"
+                   then ((.Publishers // [])[]
+                         | select((.PublishedPort // 0) > 0)
+                         | "P|\(.Protocol // "tcp")|\(.PublishedPort)")
+                   else empty end)
+            '
+        elif [ "$JSON_TOOL" = "python3" ]; then
+            python3 -c '
+import json, sys
+raw = sys.stdin.read().strip()
+items = []
+if raw:
+    try:
+        data = json.loads(raw)
+        items = data if isinstance(data, list) else [data]
+    except ValueError:
+        items = [json.loads(line) for line in raw.splitlines() if line.strip()]
+for c in items:
+    if not isinstance(c, dict):
+        continue
+    state = c.get("State") or ""
+    print("C|%s|%s|%s|%s" % (c.get("Service") or "", state, c.get("Health") or "", c.get("Image") or ""))
+    if state == "running":
+        for p in c.get("Publishers") or []:
+            if isinstance(p, dict) and int(p.get("PublishedPort") or 0) > 0:
+                print("P|%s|%s" % (p.get("Protocol") or "tcp", p["PublishedPort"]))
+'
+        else
+            return 1
+        fi
+    }
+
+    # Port à l'écoute sur l'hôte ? Retour : 0 = occupé, 1 = libre, 2 = indéterminé.
+    port_in_use() {
+        local proto="$1" port="$2" flag="-tln" out
+        [ "$proto" = "udp" ] && flag="-uln"
+        if command -v ss >/dev/null 2>&1; then
+            out=$(ss -H "$flag" "( sport = :${port} )" 2>/dev/null) || return 2
+        elif command -v netstat >/dev/null 2>&1; then
+            out=$(netstat "$flag" 2>/dev/null | awk -v suffix=":${port}" 'substr($4, length($4) - length(suffix) + 1) == suffix') || return 2
+        else
+            return 2
+        fi
+        [ -n "$out" ]
+    }
+
+    # Port publié par un conteneur en cours de ce projet compose ?
+    stack_holds_port() {
+        printf '%s\n' "$PS_ROWS" | awk -F'|' -v proto="$1" -v port="$2" '$1 == "P" && $2 == proto && $3 == port { found = 1 } END { exit !found }'
+    }
+
     echo "🏥 Stack Doctor — diagnostic complet"
     echo "===================================="
     echo ""
 
     # Check 1: Docker installed
     echo "🔍 Docker installation"
+    HAVE_DOCKER=0
     if command -v docker >/dev/null 2>&1; then
+        HAVE_DOCKER=1
         DOCKER_VER=$(docker --version 2>&1 | sed 's/^Docker version //;s/, .*//')
         ok "Docker installed (v${DOCKER_VER:-unknown})"
     else
@@ -27,8 +146,8 @@ if [ "$1" = "doctor" ]; then
 
     # Check 2: Docker Compose installed
     echo "🔍 Docker Compose installation"
-    if docker compose version >/dev/null 2>&1; then
-        COMPOSE_VER=$(docker compose version --short 2>&1)
+    if compose_cmd version >/dev/null 2>&1; then
+        COMPOSE_VER=$(compose_cmd version --short 2>&1)
         ok "Docker Compose installed (${COMPOSE_VER:-unknown})"
     elif command -v docker-compose >/dev/null 2>&1; then
         ok "docker-compose (standalone) installed"
@@ -36,22 +155,56 @@ if [ "$1" = "doctor" ]; then
         fail "Docker Compose not installed"
     fi
 
-    # Check 3: docker-compose.yml parsable
+    # Check 3: docker-compose.yml parsable (même commande que ./stack config -q)
     echo "🔍 docker-compose.yml validation"
-    if [ -f .env ]; then
-        if docker compose config >/dev/null 2>&1; then
-            ok "docker-compose.yml is valid"
+    CFG_OK=0
+    if [ ! -f .env ]; then
+        # Sans .env, les variables obligatoires manquent : contrôle de syntaxe YAML seul
+        if python3 -c "import yaml" >/dev/null 2>&1; then
+            if python3 -c "import yaml; yaml.safe_load(open('docker-compose.yml'))" >/dev/null 2>&1; then
+                ok "docker-compose.yml is valid (syntax check, .env missing)"
+            else
+                fail "docker-compose.yml has syntax errors"
+            fi
         else
-            fail "docker-compose.yml has errors"
+            info "PyYAML absent : syntaxe de docker-compose.yml non vérifiée (.env missing)"
         fi
+    elif [ "$HAVE_DOCKER" -ne 1 ]; then
+        info "docker absent : docker-compose.yml non validé"
+    elif CFG_ERR=$(compose_cmd config -q 2>&1 >/dev/null); then
+        CFG_OK=1
+        ok "docker-compose.yml is valid"
     else
-        # Without .env, required vars are missing — check syntax only
-        if python3 -c "import yaml; yaml.safe_load(open('docker-compose.yml'))" >/dev/null 2>&1; then
-            ok "docker-compose.yml is valid (syntax check, .env missing)"
-        else
-            fail "docker-compose.yml has syntax errors"
+        CFG_LINE=$(first_error_line "$CFG_ERR")
+        fail "docker-compose.yml has errors: ${CFG_LINE:-(no error message)}"
+    fi
+
+    # État lu une seule fois : config compose résolue et conteneurs en cours (JSON).
+    CFG_ROWS=""
+    PS_ROWS=""
+    CFG_READ=0
+    PS_READ=0
+    STATE_REASON=""
+    if [ "$HAVE_DOCKER" -ne 1 ]; then
+        STATE_REASON="docker absent"
+    elif [ ! -f .env ]; then
+        STATE_REASON=".env absent"
+    elif [ "$CFG_OK" -ne 1 ]; then
+        STATE_REASON="docker-compose.yml invalide"
+    elif [ -z "$JSON_TOOL" ]; then
+        STATE_REASON="jq et python3 absents"
+    else
+        if CFG_JSON=$(compose_cmd config --format json 2>/dev/null) &&
+            CFG_ROWS=$(printf '%s\n' "$CFG_JSON" | json_config_rows 2>/dev/null); then
+            CFG_READ=1
+        fi
+        if PS_JSON=$(compose_cmd ps --format json 2>/dev/null) &&
+            PS_ROWS=$(printf '%s\n' "$PS_JSON" | json_ps_rows 2>/dev/null); then
+            PS_READ=1
         fi
     fi
+    CFG_WHY="${STATE_REASON:-config --format json illisible}"
+    PS_WHY="${STATE_REASON:-ps --format json illisible, démon Docker injoignable ?}"
 
     # Check 4: .env exists and has required variables
     echo "🔍 .env file and required variables"
@@ -85,56 +238,96 @@ if [ "$1" = "doctor" ]; then
         ok "versions.env file exists"
     fi
 
-    # Check 6: Docker images up to date
+    # Check 6: images des conteneurs en cours = images résolues par le compose (versions.env)
     echo "🔍 Docker image versions"
-    if [ -f versions.env ]; then
-        OUTDATED=""
-        while IFS='=' read -r var tag; do
-            var=$(echo "$var" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
-            tag=$(echo "$tag" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
-            case "$var" in
-                ""|\#*) continue ;;
-                IMG_*)
-                    # Check if image is locally present with same tag
-                    if ! docker image inspect "$tag" >/dev/null 2>&1; then
-                        # Image not present locally (may need pull)
-                        true
-                    fi
-                    ;;
-            esac
-        done < versions.env
-        ok "Image versions from versions.env"
+    if [ "$CFG_READ" -ne 1 ] || [ "$PS_READ" -ne 1 ]; then
+        if [ "$CFG_READ" -ne 1 ]; then
+            info "comparaison impossible : ${CFG_WHY}"
+        else
+            info "comparaison impossible : ${PS_WHY}"
+        fi
+    else
+        PS_COUNT=$(printf '%s\n' "$PS_ROWS" | awk -F'|' '$1 == "C" { n++ } END { print n + 0 }')
+        if [ "$PS_COUNT" -eq 0 ]; then
+            info "aucun conteneur, pas de comparaison"
+        else
+            IMG_COMPARED=0
+            IMG_DIFF=0
+            IMG_SKIPPED=0
+            while IFS='|' read -r kind svc _ _ image; do
+                [ "$kind" = "C" ] || continue
+                expected=$(printf '%s\n' "$CFG_ROWS" | awk -F'|' -v svc="$svc" '$1 == "I" && $2 == svc { print $3; exit }')
+                if [ -z "$expected" ]; then
+                    IMG_SKIPPED=$((IMG_SKIPPED + 1))
+                    continue
+                fi
+                IMG_COMPARED=$((IMG_COMPARED + 1))
+                if [ "$image" != "$expected" ]; then
+                    IMG_DIFF=$((IMG_DIFF + 1))
+                    warn "${svc} : image en cours ${image}, attendue ${expected} (versions.env)"
+                fi
+            done <<< "$PS_ROWS"
+            if [ "$IMG_COMPARED" -eq 0 ]; then
+                info "aucune image comparable (services en cours absents de la config)"
+            elif [ "$IMG_DIFF" -eq 0 ]; then
+                ok "${IMG_COMPARED} image(s) en cours conforme(s) à versions.env"
+            fi
+            if [ "$IMG_SKIPPED" -gt 0 ]; then
+                info "${IMG_SKIPPED} conteneur(s) sans image dans la config, non comparé(s)"
+            fi
+        fi
     fi
 
     # Check 7: Ports are free
     echo "🔍 Port availability"
-    # Check ports declared in docker-compose.yml (published only)
-    # Extract ports from compose config
-    PORTS=$(docker compose config --format json 2>/dev/null | jq -r '.services // {} | to_entries[] | .value.ports // [] | .[]' 2>/dev/null | head -20)
-    if [ -z "$PORTS" ]; then
-        ok "No published ports detected (internal network only)"
+    if [ "$CFG_READ" -ne 1 ]; then
+        info "ports non vérifiés : ${CFG_WHY}"
     else
-        CONFLICTS=""
-        while IFS= read -r port; do
-            port=$(echo "$port" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
-            hostport=$(echo "$port" | sed 's/:.*//')
-            if [ "$hostport" != "$port" ]; then
-                # Check if port is in use
-                if ss -tlnp 2>/dev/null | /usr/bin/grep -q ":${hostport} " || netstat -tlnp 2>/dev/null | /usr/bin/grep -q ":${hostport} "; then
-                    CONFLICTS="${CONFLICTS} ${hostport}"
-                fi
-            fi
-        done <<< "$PORTS"
-        if [ -z "$CONFLICTS" ]; then
-            ok "All published ports are available"
+        # Ports publiés par la config (plages développées), une ligne par port : protocole|port|services
+        PORT_ROWS=$(printf '%s\n' "$CFG_ROWS" | awk -F'|' '
+            $1 == "U" {
+                n = split($4, bounds, "-")
+                lo = bounds[1] + 0
+                hi = (n > 1) ? bounds[2] + 0 : lo
+                if (lo < 1 || hi < lo) next
+                if (hi > lo + 63) hi = lo + 63
+                for (p = lo; p <= hi; p++) {
+                    key = $3 "|" p
+                    if (!(key in svcs)) {
+                        order[++count] = key
+                        svcs[key] = $2
+                    } else if (index("," svcs[key] ",", "," $2 ",") == 0) {
+                        svcs[key] = svcs[key] "," $2
+                    }
+                }
+            }
+            END { for (i = 1; i <= count; i++) print order[i] "|" svcs[order[i]] }
+        ')
+        if [ -z "$PORT_ROWS" ]; then
+            ok "No published ports detected (internal network only)"
         else
-            warn "Port conflicts:${CONFLICTS}"
+            while IFS='|' read -r PORT_PROTO PORT_NUM PORT_SVCS; do
+                [ -n "$PORT_NUM" ] || continue
+                PORT_LABEL="port ${PORT_NUM}"
+                [ "$PORT_PROTO" = "udp" ] && PORT_LABEL="port ${PORT_NUM}/udp"
+                port_in_use "$PORT_PROTO" "$PORT_NUM"
+                case $? in
+                    1) ok "${PORT_LABEL} libre (requis par ${PORT_SVCS})" ;;
+                    0)
+                        if stack_holds_port "$PORT_PROTO" "$PORT_NUM"; then
+                            ok "${PORT_LABEL} tenu par la stack (${PORT_SVCS})"
+                        else
+                            warn "${PORT_LABEL} occupé par un autre processus (requis par ${PORT_SVCS})"
+                        fi
+                        ;;
+                    *) info "${PORT_LABEL} : état indéterminé (ss et netstat absents)" ;;
+                esac
+            done <<< "$PORT_ROWS"
         fi
     fi
 
     # Check 8: Volumes exist
     echo "🔍 Volume directories"
-    MISSING_VOLS=""
     # Check data directories
     if [ -d "data" ]; then
         ok "data/ directory exists"
@@ -144,17 +337,20 @@ if [ "$1" = "doctor" ]; then
 
     # Check 9: Container health (if running)
     echo "🔍 Container health"
-    RUNNING=$(docker compose ps -q 2>/dev/null | wc -l)
-    if [ "$RUNNING" -eq 0 ]; then
-        info "No containers running (stack is down)"
+    if [ "$PS_READ" -ne 1 ]; then
+        info "état des conteneurs indisponible : ${PS_WHY}"
     else
-        UNHEALTHY=$(docker compose ps --filter "health=unhealthy" -q 2>/dev/null | wc -l)
-        RUNNING_CONTAINERS=$(docker compose ps --filter "status=running" -q 2>/dev/null | wc -l)
-        if [ "$UNHEALTHY" -eq 0 ]; then
-            ok "All ${RUNNING_CONTAINERS} running containers are healthy"
+        RUNNING=$(printf '%s\n' "$PS_ROWS" | awk -F'|' '$1 == "C" && $3 == "running" { n++ } END { print n + 0 }')
+        if [ "$RUNNING" -eq 0 ]; then
+            info "No containers running (stack is down)"
         else
-            fail "${UNHEALTHY} containers are unhealthy"
-            docker compose ps --filter "health=unhealthy" --format "table {{.Name}}\t{{.Status}}" 2>/dev/null
+            UNHEALTHY=$(printf '%s\n' "$PS_ROWS" | awk -F'|' '$1 == "C" && $4 == "unhealthy" { n++ } END { print n + 0 }')
+            if [ "$UNHEALTHY" -eq 0 ]; then
+                ok "All ${RUNNING} running containers are healthy"
+            else
+                UNHEALTHY_NAMES=$(printf '%s\n' "$PS_ROWS" | awk -F'|' '$1 == "C" && $4 == "unhealthy" { printf "%s%s", (k++ ? ", " : ""), $2 } END { print "" }')
+                fail "${UNHEALTHY} containers are unhealthy: ${UNHEALTHY_NAMES}"
+            fi
         fi
     fi
 
@@ -164,6 +360,29 @@ if [ "$1" = "doctor" ]; then
         ok "Caddyfile exists"
     else
         warn "Caddyfile not found"
+    fi
+    # Certificat racine local de Caddy (lecture seule dans le conteneur) : expire dans plus de 30 jours ?
+    if [ "$PS_READ" -ne 1 ]; then
+        info "certificat non vérifié : ${PS_WHY}"
+    elif ! printf '%s\n' "$PS_ROWS" | awk -F'|' '$1 == "C" && $2 == "caddy" && $3 == "running" { found = 1 } END { exit !found }'; then
+        warn "caddy arrêté, certificat non vérifié"
+    elif ! command -v openssl >/dev/null 2>&1; then
+        warn "openssl absent, certificat non vérifié"
+    else
+        CA_PATH="/data/caddy/pki/authorities/local/root.crt"
+        if CA_PEM=$(compose_cmd exec -T caddy cat "$CA_PATH" 2>/dev/null </dev/null) &&
+            CA_END=$(printf '%s\n' "$CA_PEM" | openssl x509 -noout -enddate 2>/dev/null); then
+            CA_END="${CA_END#notAfter=}"
+            if printf '%s\n' "$CA_PEM" | openssl x509 -noout -checkend 2592000 >/dev/null 2>&1; then
+                ok "certificat racine local valide plus de 30 jours (expire le ${CA_END})"
+            elif printf '%s\n' "$CA_PEM" | openssl x509 -noout -checkend 0 >/dev/null 2>&1; then
+                warn "certificat racine local : expire dans moins de 30 jours (le ${CA_END})"
+            else
+                fail "certificat racine local expiré (le ${CA_END})"
+            fi
+        else
+            warn "certificat racine local illisible (${CA_PATH}), non vérifié"
+        fi
     fi
 
     # Check 11: Secrets are generated
@@ -179,6 +398,8 @@ if [ "$1" = "doctor" ]; then
         else
             warn "OBSCURA_MCP_TOKEN not set or empty"
         fi
+    else
+        info ".env absent : jetons non vérifiés"
     fi
 
     echo ""
