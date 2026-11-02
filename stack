@@ -423,5 +423,634 @@ for c in items:
     fi
 fi
 
+# ==========================================================================
+# ./stack versions  — versions déclarées + conteneurs en cours
+# ./stack update    — mise à jour réelle (recherche, écriture, rollback)
+# ==========================================================================
+
+# --- Table de correspondance service Compose -> variable IMG_ -------------
+# Source : docker-compose.yml. Une variable peut piloter plusieurs services
+# (ollama/ollama-init, n8n/n8n-worker, obscura/obscura-mcp).
+SERVICE_IMG_MAP=(
+    "postgres=IMG_POSTGRES"
+    "redis=IMG_REDIS"
+    "qdrant=IMG_QDRANT"
+    "ollama=IMG_OLLAMA"
+    "ollama-init=IMG_OLLAMA"
+    "llama-server=IMG_LLAMA"
+    "litellm=IMG_LITELLM"
+    "open-webui=IMG_OPENWEBUI"
+    "n8n=IMG_N8N"
+    "n8n-worker=IMG_N8N"
+    "docling-serve=IMG_DOCLING"
+    "searxng=IMG_SEARXNG"
+    "portainer=IMG_PORTAINER"
+    "caddy=IMG_CADDY"
+    "obscura=IMG_OBSCURA"
+    "obscura-mcp=IMG_OBSCURA"
+    "kokoro=IMG_KOKORO"
+    "whisper=IMG_WHISPER"
+    "clickhouse=IMG_CLICKHOUSE"
+    "s3=IMG_S3"
+    "s3-init=IMG_S3_INIT"
+    "langfuse-worker=IMG_LANGFUSE_WORKER"
+    "langfuse-web=IMG_LANGFUSE_WEB"
+)
+
+# --- Variables IMG_ attendues (une par ligne) ----------------------------
+# Contrôle de couverture : toute variable IMG_ de versions.env doit être
+# pilotée par la table ci-dessus, sinon la mise à jour l'ignorerait en silence.
+EXPECTED_IMG_VARS="IMG_POSTGRES
+IMG_REDIS
+IMG_QDRANT
+IMG_OLLAMA
+IMG_LLAMA
+IMG_LITELLM
+IMG_OPENWEBUI
+IMG_N8N
+IMG_DOCLING
+IMG_KOKORO
+IMG_WHISPER
+IMG_CLICKHOUSE
+IMG_S3
+IMG_S3_INIT
+IMG_LANGFUSE_WEB
+IMG_LANGFUSE_WORKER
+IMG_SEARXNG
+IMG_PORTAINER
+IMG_CADDY
+IMG_OBSCURA"
+
+# Listes globales de travail (remplies par cmd_update).
+UPDATE_TARGETS=()
+UPDATE_CHANGED_SERVICES=()
+UPDATED_VARS=()
+SAME_MAJOR_ONLY=0
+
+# Outil JSON : jq, à défaut python3.
+JSON_TOOL=""
+if command -v jq >/dev/null 2>&1; then
+    JSON_TOOL="jq"
+elif command -v python3 >/dev/null 2>&1; then
+    JSON_TOOL="python3"
+fi
+
+# Tags d'une réponse JSON de registre (une ligne par tag).
+json_tags() {
+    if [ "$JSON_TOOL" = "jq" ]; then
+        jq -r '.tags[]? // empty' 2>/dev/null
+    elif [ "$JSON_TOOL" = "python3" ]; then
+        python3 -c "
+import json, sys
+try:
+    data = json.load(sys.stdin)
+except Exception:
+    sys.exit(0)
+for tag in (data.get('tags') or []):
+    print(tag)
+" 2>/dev/null
+    else
+        return 1
+    fi
+}
+
+# Noms de tags d'une réponse de l'API Docker Hub.
+json_hub_tags() {
+    if [ "$JSON_TOOL" = "jq" ]; then
+        jq -r '.results[]?.name' 2>/dev/null
+    elif [ "$JSON_TOOL" = "python3" ]; then
+        python3 -c "
+import json, sys
+try:
+    data = json.load(sys.stdin)
+except Exception:
+    sys.exit(0)
+for item in (data.get('results') or []):
+    name = item.get('name')
+    if name:
+        print(name)
+" 2>/dev/null
+    else
+        return 1
+    fi
+}
+
+# La réponse de l'API Hub annonce-t-elle une page suivante ?
+json_hub_has_next() {
+    if [ "$JSON_TOOL" = "jq" ]; then
+        jq -e '.next != null' >/dev/null 2>&1
+    elif [ "$JSON_TOOL" = "python3" ]; then
+        python3 -c "
+import json, sys
+try:
+    data = json.load(sys.stdin)
+except Exception:
+    sys.exit(1)
+sys.exit(0 if data.get('next') else 1)
+" >/dev/null 2>&1
+    else
+        return 1
+    fi
+}
+
+# Jeton d'accès anonyme renvoyé par le realm du registre.
+json_token() {
+    if [ "$JSON_TOOL" = "jq" ]; then
+        jq -r '.token // .access_token // empty' 2>/dev/null
+    elif [ "$JSON_TOOL" = "python3" ]; then
+        python3 -c "
+import json, sys
+try:
+    data = json.load(sys.stdin)
+except Exception:
+    sys.exit(0)
+print(data.get('token') or data.get('access_token') or '')
+" 2>/dev/null
+    else
+        return 1
+    fi
+}
+
+# Valeur d'une variable dans un fichier .env (lecture stricte, sans source).
+env_file_value() {
+    local file="$1" var="$2" line
+    line=$(/usr/bin/grep -m1 "^${var}=" "$file" 2>/dev/null) || return 1
+    [ -n "$line" ] || return 1
+    printf '%s\n' "${line#*=}"
+}
+
+# Écrit (ou remplace) une variable dans un fichier .env.
+set_env_value() {
+    local file="$1" var="$2" value="$3"
+    if /usr/bin/grep -q "^${var}=" "$file" 2>/dev/null; then
+        sed -i "s|^${var}=.*|${var}=${value}|" "$file" || return 1
+    else
+        printf '%s=%s\n' "$var" "$value" >> "$file" || return 1
+    fi
+}
+
+# Variable IMG_ pilotant un service (vide si le service n'est pas piloté).
+service_img_var() {
+    local svc="$1" entry
+    for entry in "${SERVICE_IMG_MAP[@]}"; do
+        [ "${entry%%=*}" = "$svc" ] || continue
+        printf '%s\n' "${entry#*=}"
+        return 0
+    done
+    return 1
+}
+
+# Le service fait-il partie de la table ?
+service_is_known() {
+    local svc="$1" entry
+    for entry in "${SERVICE_IMG_MAP[@]}"; do
+        [ "${entry%%=*}" = "$svc" ] && return 0
+    done
+    return 1
+}
+
+# Noms de tous les services pilotés par versions.env (un par ligne).
+all_service_names() {
+    local entry
+    for entry in "${SERVICE_IMG_MAP[@]}"; do
+        printf '%s\n' "${entry%%=*}"
+    done
+}
+
+# La valeur est-elle déjà dans la liste ?
+var_in_list() {
+    local needle="$1" item
+    shift
+    for item in "$@"; do
+        [ "$item" = "$needle" ] && return 0
+    done
+    return 1
+}
+
+# Variables IMG_ de versions.env absentes de la table du script.
+img_vars_not_covered() {
+    local var known missing="" known_var
+    while IFS= read -r var; do
+        [ -n "$var" ] || continue
+        known=0
+        while IFS= read -r known_var; do
+            [ "$known_var" = "$var" ] && { known=1; break; }
+        done <<< "$EXPECTED_IMG_VARS"
+        [ "$known" -eq 1 ] || missing="$missing $var"
+    done < <(/usr/bin/grep -oE '^IMG_[A-Z0-9_]+' versions.env 2>/dev/null)
+    printf '%s' "$missing"
+}
+
+# Vérifications préalables à une mise à jour.
+update_preconditions() {
+    if [ ! -f versions.env ]; then
+        echo "❌ versions.env introuvable dans $(pwd)" >&2
+        return 1
+    fi
+    if ! command -v docker >/dev/null 2>&1; then
+        echo "❌ docker absent du PATH : mise à jour impossible" >&2
+        return 1
+    fi
+    local missing
+    missing=$(img_vars_not_covered)
+    if [ -n "$missing" ]; then
+        echo "❌ variables IMG_ de versions.env non pilotées par la table du script :${missing}" >&2
+        echo "   complète SERVICE_IMG_MAP dans ./stack puis relance la mise à jour" >&2
+        return 1
+    fi
+    return 0
+}
+
+# Construit la liste des services à mettre à jour (UPDATE_TARGETS).
+# Erreur explicite + liste des services acceptés si un nom est inconnu.
+build_update_targets() {
+    UPDATE_TARGETS=()
+    local svc
+    if [ "$#" -eq 0 ]; then
+        while IFS= read -r svc; do
+            [ -n "$svc" ] && UPDATE_TARGETS+=("$svc")
+        done < <(all_service_names)
+    else
+        for svc in "$@"; do
+            if ! service_is_known "$svc"; then
+                echo "❌ service inconnu : « $svc »" >&2
+                echo "   services acceptés :" >&2
+                all_service_names | sed 's/^/     - /' >&2
+                return 1
+            fi
+            UPDATE_TARGETS+=("$svc")
+        done
+    fi
+    return 0
+}
+
+# Usage de ./stack update.
+update_usage() {
+    cat <<'USAGE'
+Usage: ./stack update [--dry-run] [service...]
+
+Met à jour les images des services indiqués (tous les services si aucun nom
+n'est donné) : recherche d'une version plus récente dans le registre, écriture
+dans versions.env, pull de l'image, recréation des conteneurs, test de santé.
+En cas d'échec du test de santé, versions.env est restauré (rollback).
+
+  --dry-run   affiche les versions trouvées sans rien modifier
+  -h, --help  cette aide
+
+Services acceptés (une variable IMG_ par service) :
+USAGE
+    all_service_names | sed 's/^/  - /'
+}
+
+# Découpe "repo:tag" -> dépôt et tag (échoue sur un digest ou un tag absent).
+split_image_tag() {
+    local image="$1" repo tag
+    case "$image" in
+        *@*) return 1 ;;
+    esac
+    if [[ "$image" == *:* ]]; then
+        repo="${image%:*}"
+        tag="${image##*:}"
+    else
+        return 1
+    fi
+    [ -n "$tag" ] || return 1
+    printf '%s %s\n' "$repo" "$tag"
+}
+
+# Hôte du registre et chemin du dépôt pour une référence sans tag.
+registry_parts() {
+    local repo="$1" host path
+    case "$repo" in
+        */*)
+            if [[ "${repo%%/*}" == *.* || "${repo%%/*}" == *:* ]]; then
+                host="${repo%%/*}"
+                path="${repo#*/}"
+            else
+                host="registry-1.docker.io"
+                path="$repo"
+            fi
+            ;;
+        *)
+            host="registry-1.docker.io"
+            path="library/$repo"
+            ;;
+    esac
+    printf '%s %s\n' "$host" "$path"
+}
+
+# Tags publiés pour un dépôt.
+# Docker Hub : API Hub (tags les plus récemment mis à jour en premier).
+# Autres registres : API OCI, par lots de 1000 tags.
+registry_tags() {
+    local host="$1" path="$2"
+    if [ "$host" = "registry-1.docker.io" ]; then
+        registry_tags_hub "$path"
+        return $?
+    fi
+    registry_tags_oci "$host" "$path"
+}
+
+# Tags d'un dépôt Docker Hub (ordre : dernière mise à jour décroissante).
+registry_tags_hub() {
+    local path="$1" page=1 body names
+    while [ "$page" -le 3 ]; do
+        body=$(curl -sS --max-time 25 "https://registry.hub.docker.com/v2/repositories/${path}/tags?page_size=100&page=${page}" 2>/dev/null) || return 1
+        names=$(printf '%s' "$body" | json_hub_tags)
+        [ -n "$names" ] || return 0
+        printf '%s\n' "$names"
+        printf '%s' "$body" | json_hub_has_next || return 0
+        page=$((page + 1))
+    done
+    return 0
+}
+
+# Tags d'un dépôt OCI (registre autre que Docker Hub), par lots de 1000.
+registry_tags_oci() {
+    local host="$1" path="$2" body tags challenge realm service authtok page="" count=0
+    while : ; do
+        if [ -z "$page" ]; then
+            body=$(curl -sS --max-time 25 "https://${host}/v2/${path}/tags/list?n=1000" 2>/dev/null) || return 1
+        else
+            body=$(curl -sS --max-time 25 "https://${host}/v2/${path}/tags/list?n=1000&last=${page}" 2>/dev/null) || return 1
+        fi
+        tags=$(printf '%s' "$body" | json_tags)
+        if [ -z "$tags" ]; then
+            # Accès refusé : on récupère le jeton anonyme proposé par le registre.
+            challenge=$(curl -sS -i -L --max-time 20 "https://${host}/v2/" 2>/dev/null | /usr/bin/grep -i '^www-authenticate:' | head -1)
+            realm=$(printf '%s' "$challenge" | sed -n 's/.*realm="\([^"]*\)".*/\1/p')
+            service=$(printf '%s' "$challenge" | sed -n 's/.*service="\([^"]*\)".*/\1/p')
+            [ -n "$realm" ] || return 1
+            authtok=$(curl -sS --max-time 20 "${realm}?service=${service}&scope=repository:${path}:pull" 2>/dev/null | json_token)
+            [ -n "$authtok" ] || return 1
+            body=$(curl -sS --max-time 25 -H "Authorization: Bearer ${authtok}" "https://${host}/v2/${path}/tags/list?n=1000" 2>/dev/null) || return 1
+            tags=$(printf '%s' "$body" | json_tags)
+        fi
+        [ -n "$tags" ] || return 0
+        printf '%s\n' "$tags"
+        count=$(printf '%s\n' "$tags" | wc -l)
+        [ "$count" -ge 1000 ] || return 0
+        page=$(printf '%s\n' "$tags" | tail -1)
+        [ -n "$page" ] || return 0
+    done
+}
+
+# "Forme" d'un tag : chaque suite de chiffres remplacée par # (17.11 -> #.#).
+tag_shape() {
+    printf '%s' "$1" | sed -E 's/[0-9]+/#/g'
+}
+
+# Composantes numériques d'un tag ("17.11" -> "17 11").
+tag_numbers() {
+    printf '%s' "$1" | /usr/bin/grep -oE '[0-9]+' | tr '\n' ' '
+}
+
+# Composante majeure d'un tag (1re composante numérique). Vide si le tag
+# n'a qu'un seul numéro (numéro de build : server-cuda-b11206).
+tag_major() {
+    local nums
+    nums=$(tag_numbers "$1")
+    set -- $nums
+    [ "$#" -ge 2 ] || return 0
+    printf '%s' "$1"
+}
+
+# Tag (sans le dépôt) d'une référence d'image.
+image_tag() {
+    local image="$1"
+    case "$image" in *@*) return 1 ;; esac
+    printf '%s' "${image##*:}"
+}
+
+# Mention d'avertissement quand la version majeure change.
+major_note() {
+    local a b
+    a=$(tag_major "$(image_tag "$1")")
+    b=$(tag_major "$(image_tag "$2")")
+    if [ -n "$a" ] && [ -n "$b" ] && [ "$a" != "$b" ]; then
+        printf '  ⚠️ version majeure (%s → %s)' "$a" "$b"
+    fi
+}
+
+# Le tag candidat est-il strictement plus récent que le tag courant ?
+# Même forme exigée (mêmes littéraux, même nombre de composantes) : un tag
+# flottant ou d'une autre série n'est jamais proposé.
+tag_is_newer() {
+    local cand="$1" cur="$2"
+    [ "$cand" != "$cur" ] || return 1
+    [ "$(tag_shape "$cand")" = "$(tag_shape "$cur")" ] || return 1
+    local -a cn nn
+    read -r -a cn <<< "$(tag_numbers "$cand")"
+    read -r -a nn <<< "$(tag_numbers "$cur")"
+    [ "${#cn[@]}" -eq "${#nn[@]}" ] || return 1
+    local i
+    for (( i = 0; i < ${#cn[@]}; i++ )); do
+        if (( 10#${cn[i]} > 10#${nn[i]} )); then return 0; fi
+        if (( 10#${cn[i]} < 10#${nn[i]} )); then return 1; fi
+    done
+    return 1
+}
+
+# Cherche une image strictement plus récente pour une référence "repo:tag".
+# Une version de la même série majeure est préférée ; à défaut, la plus haute
+# version disponible est retenue (le changement de majeure est signalé).
+# Retourne la nouvelle référence complète, ou vide si rien de plus récent.
+find_newer_image() {
+    local image="$1" repo tag host path cand tags
+    local best="" best_same="" cur_major cand_major
+    read -r repo tag < <(split_image_tag "$image") || return 0
+    [ -n "$tag" ] || return 0
+    read -r host path < <(registry_parts "$repo")
+    tags=$(registry_tags "$host" "$path") || return 0
+    [ -n "$tags" ] || return 0
+    cur_major=$(tag_major "$tag")
+    while IFS= read -r cand; do
+        [ -n "$cand" ] || continue
+        tag_is_newer "$cand" "$tag" || continue
+        if [ -z "$best" ] || tag_is_newer "$cand" "$best"; then
+            best="$cand"
+        fi
+        cand_major=$(tag_major "$cand")
+        if [ -n "$cur_major" ] && [ "$cand_major" = "$cur_major" ]; then
+            if [ -z "$best_same" ] || tag_is_newer "$cand" "$best_same"; then
+                best_same="$cand"
+            fi
+        fi
+    done <<< "$tags"
+    if [ -n "$best_same" ]; then
+        best="$best_same"
+    elif [ "$SAME_MAJOR_ONLY" -eq 1 ]; then
+        return 0
+    fi
+    [ -n "$best" ] || return 0
+    printf '%s:%s\n' "$repo" "$best"
+}
+
+# Restauration après échec : versions.env remis à l'état sauvegardé et
+# conteneurs recréés avec les versions précédentes. La sauvegarde est conservée.
+rollback_update() {
+    local backup_dir="$1"
+    echo "↩️  rollback : restauration de versions.env depuis $backup_dir/versions.env.snapshot"
+    cp "$backup_dir/versions.env.snapshot" versions.env || { echo "❌ restauration de versions.env impossible" >&2; return 1; }
+    if [ "${#UPDATE_CHANGED_SERVICES[@]}" -gt 0 ]; then
+        echo "↩️  rollback : recréation des conteneurs avec les versions précédentes"
+        docker compose --env-file versions.env --env-file .env up -d "${UPDATE_CHANGED_SERVICES[@]}" >/dev/null 2>&1 || true
+    fi
+    echo "❌ mise à jour annulée : versions.env restauré"
+    echo "   sauvegarde conservée : $backup_dir/versions.env.snapshot"
+    return 1
+}
+
+# ./stack versions — versions déclarées puis conteneurs en cours.
+cmd_versions() {
+    echo "📦 Versions déclarées (versions.env)"
+    echo "===================================="
+    if [ ! -f versions.env ]; then
+        echo "❌ versions.env introuvable dans $(pwd)" >&2
+        return 1
+    fi
+    local line
+    while IFS= read -r line; do
+        case "$line" in ''|'#'*) continue ;; esac
+        case "$line" in *=*) ;; *) continue ;; esac
+        printf '  %-22s %s\n' "${line%%=*}" "${line#*=}"
+    done < versions.env
+    echo ""
+    echo "🐳 Conteneurs (service / image / état)"
+    echo "--------------------------------------"
+    if ! command -v docker >/dev/null 2>&1; then
+        echo "  ⚠️  docker absent du PATH : état des conteneurs indisponible"
+        return 0
+    fi
+    local ps_json rows
+    ps_json=$(docker compose --env-file versions.env --env-file .env ps -a --format json 2>/dev/null || true)
+    if [ -z "$ps_json" ]; then
+        echo "  ℹ️  aucun conteneur : la stack n'est pas démarrée"
+        return 0
+    fi
+    if [ "$JSON_TOOL" = "jq" ]; then
+        rows=$(printf '%s\n' "$ps_json" | jq -s -r 'flatten | .[] | select(type == "object") | [.Service, .Image, .State, (.Health // "-")] | @tsv' 2>/dev/null || true)
+    elif [ "$JSON_TOOL" = "python3" ]; then
+        rows=$(printf '%s\n' "$ps_json" | python3 -c "
+import json, sys
+raw = sys.stdin.read().strip()
+if not raw:
+    sys.exit(0)
+try:
+    data = json.loads(raw)
+except ValueError:
+    data = [json.loads(line) for line in raw.splitlines() if line.strip()]
+for item in (data if isinstance(data, list) else [data]):
+    if not isinstance(item, dict):
+        continue
+    print('\t'.join([
+        str(item.get('Service') or '-'),
+        str(item.get('Image') or '-'),
+        str(item.get('State') or '-'),
+        str(item.get('Health') or '-'),
+    ]))
+" 2>/dev/null || true)
+    else
+        rows=$(docker compose --env-file versions.env --env-file .env ps -a --format '{{.Service}} {{.Image}} {{.State}}' 2>/dev/null || true)
+    fi
+    if [ -z "$rows" ]; then
+        echo "  ℹ️  aucun conteneur : la stack n'est pas démarrée"
+        return 0
+    fi
+    printf '  %-18s %-46s %-10s %s\n' "SERVICE" "IMAGE" "ETAT" "SANTE"
+    local svc img state health
+    while IFS=$'\t' read -r svc img state health; do
+        [ -n "$svc" ] || continue
+        printf '  %-18s %-46s %-10s %s\n' "$svc" "$img" "$state" "${health:-}"
+    done <<< "$rows"
+    return 0
+}
+
+# ./stack update — met à jour réellement les images, avec rollback.
+cmd_update() {
+    local dry_run=0
+    local -a requested=()
+    while [ "$#" -gt 0 ]; do
+        case "$1" in
+            --dry-run) dry_run=1; shift ;;
+            --same-major-only) SAME_MAJOR_ONLY=1; shift ;;
+            -h|--help) update_usage; return 0 ;;
+            -*) echo "❌ option inconnue : $1" >&2; update_usage >&2; return 2 ;;
+            *) requested+=("$1"); shift ;;
+        esac
+    done
+    update_preconditions || return 2
+    build_update_targets "${requested[@]}" || return 2
+    local -a targets=("${UPDATE_TARGETS[@]}")
+    local backup_dir
+    backup_dir=$(mktemp -d "${TMPDIR:-/tmp}/stack-update-XXXXXX") || { echo "❌ répertoire de sauvegarde impossible" >&2; return 1; }
+    echo "🔄 Mise à jour de la stack"
+    echo "=========================="
+    echo "1/5 — sauvegarde de versions.env"
+    cp versions.env "$backup_dir/versions.env.snapshot" || { echo "❌ sauvegarde impossible" >&2; return 1; }
+    echo "    💾 $backup_dir/versions.env.snapshot (conservée jusqu'au test de santé réussi : rollback possible)"
+    echo "2/5 — recherche de versions plus récentes"
+    local svc var cur newimg
+    UPDATE_CHANGED_SERVICES=()
+    UPDATED_VARS=()
+    for svc in "${targets[@]}"; do
+        var=$(service_img_var "$svc" || true)
+        cur=$(env_file_value versions.env "$var" || true)
+        if [ -z "$var" ] || [ -z "$cur" ]; then
+            echo "    ⚠️  $svc : image non pilotée par versions.env — ignoré"
+            continue
+        fi
+        if var_in_list "$var" "${UPDATED_VARS[@]}"; then
+            echo "    • $svc ($var) : image déjà mise à jour (même variable)"
+            UPDATE_CHANGED_SERVICES+=("$svc")
+            continue
+        fi
+        newimg=$(find_newer_image "$cur" || true)
+        if [ -z "$newimg" ]; then
+            echo "    • $svc ($var) : $cur — aucune version plus récente vérifiable"
+            continue
+        fi
+        echo "    • $svc ($var) : ${cur} → ${newimg}$(major_note "$cur" "$newimg")"
+        [ "$dry_run" -eq 1 ] && continue
+        set_env_value versions.env "$var" "$newimg" || { echo "❌ écriture impossible dans versions.env" >&2; rollback_update "$backup_dir"; return 1; }
+        echo "    ↓ pull $svc ($newimg)"
+        docker compose --env-file versions.env --env-file .env pull "$svc" >/dev/null 2>&1 || { echo "❌ pull impossible pour $svc ($newimg)" >&2; rollback_update "$backup_dir"; return 1; }
+        UPDATED_VARS+=("$var")
+        UPDATE_CHANGED_SERVICES+=("$svc")
+    done
+    if [ "${#UPDATE_CHANGED_SERVICES[@]}" -eq 0 ] || [ "$dry_run" -eq 1 ]; then
+        [ "$dry_run" -eq 1 ] && echo "    (simulation : versions.env non modifié)" || echo "✅ Aucune version plus récente à appliquer"
+        rm -rf "$backup_dir"
+        return 0
+    fi
+    echo "3/5 — recréation des conteneurs concernés"
+    docker compose --env-file versions.env --env-file .env up -d "${UPDATE_CHANGED_SERVICES[@]}" || { echo "❌ recréation impossible" >&2; rollback_update "$backup_dir"; return 1; }
+    echo "4/5 — test de santé (test-stack.sh)"
+    local health=0
+    ./test-stack.sh --wait "${STACK_UPDATE_WAIT:-120}" || health=$?
+    if [ "$health" -ne 0 ]; then
+        echo "5/5 — test de santé en échec : rollback"
+        rollback_update "$backup_dir"
+        return 1
+    fi
+    echo "5/5 — test de santé réussi : sauvegarde supprimée"
+    rm -rf "$backup_dir"
+    echo "✅ Mise à jour terminée"
+    return 0
+}
+
+# Routage des sous-commandes propres au script (doctor est traité plus haut).
+case "${1:-}" in
+    versions)
+        cmd_versions
+        exit $?
+        ;;
+    update)
+        shift
+        cmd_update "$@"
+        exit $?
+        ;;
+esac
+
 # Default: pass through to docker compose
 exec docker compose --env-file versions.env --env-file .env "$@"

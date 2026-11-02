@@ -3,6 +3,8 @@
 `./stack` est le point d'entrée unique pour piloter la stack. Il se replace lui-même dans le dossier du dépôt, quel que soit le répertoire courant, puis :
 
 - `./stack doctor` lance le diagnostic décrit ci-dessous ;
+- `./stack versions` affiche les versions déclarées et les conteneurs en cours ;
+- `./stack update [service...]` met à jour les images des services, avec rollback automatique ;
 - toute autre commande est transmise telle quelle à Docker Compose, avec les deux fichiers d'environnement du dépôt :
 
   ```bash
@@ -118,3 +120,117 @@ Si l'un d'eux manque, le contrôle concerné affiche un ℹ️ ou un ⚠️ « n
 ### Lecture seule
 
 Le diagnostic n'exécute que `docker --version`, `docker compose version`, `config`, `ps` et la lecture du certificat dans le conteneur caddy. Il ne télécharge rien, ne démarre, n'arrête et ne supprime aucun conteneur, n'écrit aucun fichier et n'utilise pas `sudo` : il peut être lancé à tout moment, y compris sur une stack en service.
+
+## ./stack versions
+
+### But
+
+Afficher en une commande la version de chaque image déclarée dans `versions.env`, puis l'état réel des conteneurs (image en cours, état, santé). La commande ne modifie rien.
+
+### Usage
+
+```bash
+./stack versions
+echo $?   # 0
+```
+
+### Sortie
+
+Deux blocs :
+
+1. **les versions déclarées** — une ligne par variable de `versions.env` (`IMG_POSTGRES`, `IMG_REDIS`, …), au format `variable  valeur` ;
+2. **les conteneurs** — un tableau `SERVICE / IMAGE / ETAT / SANTE` construit à partir de `docker compose ps -a --format json`.
+
+Si la stack n'est pas démarrée, un message l'indique clairement (« aucun conteneur : la stack n'est pas démarrée ») et la commande se termine quand même avec le code 0 : ce n'est pas une erreur.
+
+Si Docker est absent du `PATH`, seul le premier bloc est affiché et l'indisponibilité des conteneurs est signalée.
+
+### Codes retour
+
+| Code | Condition |
+|------|-----------|
+| `0` | versions affichées (stack arrêtée comprise) |
+| `1` | `versions.env` introuvable dans le dépôt |
+
+## ./stack update
+
+### But
+
+Mettre à jour **réellement** les images de la stack : recherche d'une version plus récente dans le registre, écriture dans `versions.env`, téléchargement de l'image, recréation des conteneurs, puis test de santé. Si le test de santé échoue, la mise à jour est annulée : `versions.env` est restauré et les conteneurs repartent avec les versions précédentes.
+
+### Usage
+
+```bash
+./stack update                      # tous les services
+./stack update postgres redis       # seulement ceux-là
+./stack update --dry-run            # simulation : aucune écriture
+./stack update --same-major-only    # pas de changement de version majeure
+./stack update --help
+```
+
+### Les cinq étapes
+
+| Étape | Action |
+|-------|--------|
+| 1/5 | sauvegarde de `versions.env` (copie `versions.env.snapshot` dans un répertoire temporaire, chemin affiché) |
+| 2/5 | recherche d'une version plus récente, écriture de la nouvelle valeur dans `versions.env`, `docker compose pull` |
+| 3/5 | recréation des conteneurs concernés (`docker compose up -d <services>`) |
+| 4/5 | test de santé (`./test-stack.sh`) |
+| 5/5 | suppression de la sauvegarde — **uniquement si le test de santé est réussi** |
+
+Pour chaque service traité, la version avant et la version après sont affichées :
+
+```text
+    • postgres (IMG_POSTGRES) : postgres:17.11 → postgres:18.0
+```
+
+### Recherche d'une version plus récente
+
+- Les tags publiés sont lus via l'API OCI du registre (Docker Hub, GHCR, docker.n8n.io, docker.langfuse.com…), en accès anonyme : aucun identifiant n'est stocké ni requis.
+- Un candidat n'est retenu que s'il a **exactement la même forme** que le tag courant (mêmes suites de caractères, même nombre de composantes) et un numéro supérieur : `17.11` → `17.12` ou `18.0`, `v0.9.1-cu128` → `v0.9.2-cu128`. Un tag flottant (`latest`) ou d'une autre série n'est jamais proposé : les tags restent épinglés.
+- Une version de la **même série majeure** est préférée ; si aucune n'existe, la version majeure la plus haute est retenue et le changement est signalé (`⚠️ version majeure (17 → 18)`). L'option `--same-major-only` interdit ce changement : la mise à jour ne porte alors que sur la série majeure courante. Dans tous les cas, le test de santé tranche et le rollback annule une mise à jour incompatible.
+- Si aucune version plus récente n'est vérifiable (registre injoignable, image épinglée par digest), le service est signalé (« aucune version plus récente vérifiable ») et laissé intact : la mise à jour continue pour les autres.
+- `--dry-run` affiche les versions trouvées sans rien modifier.
+
+### Services acceptés et couverture
+
+Le script contient la table complète service Compose → variable `IMG_` de `versions.env`. Les 20 variables `IMG_*` de `versions.env` y sont couvertes, y compris `IMG_S3_INIT` (service `s3-init`) et `IMG_LANGFUSE_WEB` / `IMG_LANGFUSE_WORKER`.
+
+- Un nom de service hors table est **refusé** avec la liste des services acceptés (code 2) : rien n'est ignoré en silence.
+- Une variable `IMG_*` présente dans `versions.env` mais absente de la table fait échouer la mise à jour (code 2) : il faut compléter la table du script.
+- Un service dont l'image n'est pas pilotée par `versions.env` (par exemple `comfyui`, image construite localement) est signalé et laissé intact.
+
+### Rollback
+
+En cas d'échec du test de santé (ou du pull, ou de la recréation) :
+
+1. `versions.env` est restauré depuis la sauvegarde ;
+2. les conteneurs concernés sont recréés avec les versions précédentes ;
+3. le message l'annonce explicitement (« mise à jour annulée : versions.env restauré ») ;
+4. la commande se termine avec le code **1**.
+
+La sauvegarde **n'est pas supprimée** dans ce cas : son chemin est affiché, elle est conservée pour l'analyse. Elle n'est supprimée qu'après un test de santé réussi.
+
+### Codes retour
+
+| Code | Condition |
+|------|-----------|
+| `0` | mise à jour appliquée et test de santé réussi, ou aucune version plus récente à appliquer |
+| `1` | mise à jour échouée et annulée (test de santé, pull ou recréation en échec) — rollback effectué |
+| `2` | erreur d'usage : service inconnu, option inconnue, `versions.env` absent, ou variable `IMG_*` non couverte par la table |
+
+### Options
+
+| Option | Effet |
+|--------|-------|
+| `--dry-run` | affiche les versions trouvées, n'écrit rien |
+| `--same-major-only` | ne propose que des versions de la série majeure courante |
+| `-h`, `--help` | aide de la commande |
+
+### Prérequis
+
+- `docker` et `docker compose` ;
+- `curl` pour interroger les registres ;
+- `jq`, ou `python3` à défaut, pour lire les sorties JSON de Compose.
+
+Aucune valeur secrète n'est écrite, aucun privilège `sudo` n'est utilisé et aucun tag flottant n'est introduit.
